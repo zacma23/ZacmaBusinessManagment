@@ -37,6 +37,10 @@ import type {
   Organization,
   OrganizationMember,
   PublicSupportConfig,
+  SaasInvoice,
+  SaasPlan,
+  SaasSalesInquiry,
+  SaasTenantSubscription,
   StudentRegistration,
   SupportConversation,
   SupportKnowledgeItem,
@@ -49,6 +53,12 @@ import {
   DEFAULT_SUPPORT_WELCOME_MESSAGE,
   seedEighteenInstituteCourses,
 } from '../lib/supportService';
+import {
+  DEFAULT_SAAS_PLANS,
+  ensureRootTenantSubscription,
+  seedDefaultSaasPlans,
+  switchActiveOrganization,
+} from '../lib/saasService';
 
 interface PortalContextValue {
   user: User | null;
@@ -56,10 +66,12 @@ interface PortalContextValue {
   dataLoading: boolean;
   profile: UserProfile | null;
   organization: Organization | null;
+  myOrganizations: Organization[];
   currentMember: OrganizationMember | null;
   effectiveRole: UserRole;
   effectiveCrmAccess: boolean;
   isSuperAdmin: boolean;
+  isPlatformOwner: boolean;
   members: OrganizationMember[];
   businessUnits: BusinessUnit[];
   forms: DynamicForm[];
@@ -75,9 +87,15 @@ interface PortalContextValue {
   knowledgeItems: SupportKnowledgeItem[];
   supportConversations: SupportConversation[];
   studentRegistrations: StudentRegistration[];
+  saasPlans: SaasPlan[];
+  currentTenantSubscription: SaasTenantSubscription | null;
+  allTenantSubscriptions: SaasTenantSubscription[];
+  saasInvoices: SaasInvoice[];
+  saasSalesInquiries: SaasSalesInquiry[];
   signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
   markNotificationRead: (notificationId: string) => Promise<void>;
+  switchOrganization: (targetOrgId: string) => Promise<void>;
 }
 
 const PortalContext = createContext<PortalContextValue | null>(null);
@@ -89,6 +107,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
+  const [myOrganizations, setMyOrganizations] = useState<Organization[]>([]);
   const [members, setMembers] = useState<OrganizationMember[]>([]);
   const [businessUnits, setBusinessUnits] = useState<BusinessUnit[]>([]);
   const [formsByUnit, setFormsByUnit] = useState<Record<string, DynamicForm[]>>({});
@@ -104,6 +123,16 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
   const [supportConversations, setSupportConversations] = useState<SupportConversation[]>([]);
   const [studentRegistrations, setStudentRegistrations] = useState<StudentRegistration[]>([]);
 
+  // Commercial Multi-Tenant SaaS state
+  const [saasPlans, setSaasPlans] = useState<SaasPlan[]>(
+    DEFAULT_SAAS_PLANS.map((p) => ({ ...p, updatedAt: null }))
+  );
+  const [currentTenantSubscription, setCurrentTenantSubscription] =
+    useState<SaasTenantSubscription | null>(null);
+  const [allTenantSubscriptions, setAllTenantSubscriptions] = useState<SaasTenantSubscription[]>([]);
+  const [saasInvoices, setSaasInvoices] = useState<SaasInvoice[]>([]);
+  const [saasSalesInquiries, setSaasSalesInquiries] = useState<SaasSalesInquiry[]>([]);
+
   const isBootstrapSuper = Boolean(
     user?.email &&
       user.emailVerified &&
@@ -117,6 +146,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       if (!firebaseUser) {
         setProfile(null);
         setOrganization(null);
+        setMyOrganizations([]);
         setMembers([]);
         setBusinessUnits([]);
         setFormsByUnit({});
@@ -131,6 +161,10 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         setKnowledgeItems([]);
         setSupportConversations([]);
         setStudentRegistrations([]);
+        setCurrentTenantSubscription(null);
+        setAllTenantSubscriptions([]);
+        setSaasInvoices([]);
+        setSaasSalesInquiries([]);
         setAuthLoading(false);
         return;
       }
@@ -168,15 +202,15 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           setProfile(existingProfile);
         }
 
-        // If bootstrapped Super Admin, ensure root organization, super_admin member, and integration governance records exist
+        // If bootstrapped Super Admin (Platform Owner), ensure root organization, plans, and 18 institute courses exist
         if (isBootstrap) {
-          const orgRef = doc(db, `organizations/${orgId}`);
-          const orgSnap = await getDoc(orgRef);
+          const rootOrgRef = doc(db, `organizations/${DEFAULT_ORG_ID}`);
+          const rootOrgSnap = await getDoc(rootOrgRef);
 
-          if (!orgSnap.exists()) {
+          if (!rootOrgSnap.exists()) {
             const batch = writeBatch(db);
-            batch.set(orgRef, {
-              id: orgId,
+            batch.set(rootOrgRef, {
+              id: DEFAULT_ORG_ID,
               name: 'Zacma Technology',
               slug: 'zacma',
               ownerId: firebaseUser.uid,
@@ -188,9 +222,9 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               updatedAt: serverTimestamp(),
             });
 
-            batch.set(doc(db, `organizations/${orgId}/members/${firebaseUser.uid}`), {
+            batch.set(doc(db, `organizations/${DEFAULT_ORG_ID}/members/${firebaseUser.uid}`), {
               userId: firebaseUser.uid,
-              organizationId: orgId,
+              organizationId: DEFAULT_ORG_ID,
               email: firebaseUser.email || BOOTSTRAP_SUPER_ADMIN_EMAIL,
               displayName: firebaseUser.displayName || 'Zacma Super Admin',
               role: 'super_admin',
@@ -203,11 +237,10 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               updatedAt: serverTimestamp(),
             });
 
-            // Initialize integration governance catalog (no secrets stored — strictly Super Admin approval records)
             const defaultIntegrations: Array<Omit<IntegrationConfig, 'updatedAt'>> = [
               {
                 id: 'int_gemini_ai',
-                organizationId: orgId,
+                organizationId: DEFAULT_ORG_ID,
                 providerKey: 'gemini_ai',
                 displayName: 'Google Gemini AI (Configured)',
                 purpose: 'Powers the AI Form Generator and permission-scoped Zacma AI Assistant via server-side API.',
@@ -220,7 +253,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               },
               {
                 id: 'int_resend_email',
-                organizationId: orgId,
+                organizationId: DEFAULT_ORG_ID,
                 providerKey: 'resend_email',
                 displayName: 'Resend Transactional & Bulk Email',
                 purpose: 'Delivers individual and bulk personalized emails from the CRM Communication Center.',
@@ -233,9 +266,9 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               },
               {
                 id: 'int_twilio_sms',
-                organizationId: orgId,
+                organizationId: DEFAULT_ORG_ID,
                 providerKey: 'twilio_sms',
-                displayName: 'Twilio Programmable SMS',
+                displayName: 'Twilio / AfroMessage Programmable SMS',
                 purpose: 'Sends individual and bulk SMS messages and follow-up reminders to CRM leads.',
                 requiredCredentials: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER'],
                 estimatedCost: 'Pay-as-you-go (~$0.0079/SMS US; regional carrier rates apply)',
@@ -246,7 +279,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               },
               {
                 id: 'int_whatsapp_cloud',
-                organizationId: orgId,
+                organizationId: DEFAULT_ORG_ID,
                 providerKey: 'whatsapp_cloud',
                 displayName: 'WhatsApp Business Cloud API',
                 purpose: 'Enables verified business messaging and lead follow-ups over WhatsApp.',
@@ -260,7 +293,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             ];
 
             for (const intItem of defaultIntegrations) {
-              batch.set(doc(db, `organizations/${orgId}/integrations/${intItem.id}`), {
+              batch.set(doc(db, `organizations/${DEFAULT_ORG_ID}/integrations/${intItem.id}`), {
                 ...intItem,
                 updatedAt: serverTimestamp(),
               });
@@ -269,12 +302,23 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             await batch.commit();
           }
 
-          // Ensure Section 8 AI Customer Support configuration exists for this organization
-          const supportRef = doc(db, `publicSupport/${orgId}`);
+          // Seed SaaS Commercial Plans & Root Tenant record
+          await seedDefaultSaasPlans();
+          await ensureRootTenantSubscription({
+            organizationId: DEFAULT_ORG_ID,
+            organizationName: 'Zacma Technology',
+            organizationSlug: 'zacma',
+            ownerId: firebaseUser.uid,
+            ownerName: firebaseUser.displayName || 'Zacma Super Admin',
+            ownerEmail: firebaseUser.email || BOOTSTRAP_SUPER_ADMIN_EMAIL,
+          });
+
+          // Ensure Section 8 AI Customer Support configuration exists for Zacma HQ
+          const supportRef = doc(db, `publicSupport/${DEFAULT_ORG_ID}`);
           const supportSnap = await getDoc(supportRef);
           if (!supportSnap.exists()) {
             await setDoc(supportRef, {
-              organizationId: orgId,
+              organizationId: DEFAULT_ORG_ID,
               isActive: true,
               assistantName: 'ZACMA AI ASSISTANT',
               welcomeMessage: DEFAULT_SUPPORT_WELCOME_MESSAGE,
@@ -288,15 +332,15 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             });
           }
 
-          // Ensure all 18 administrator-approved Zacma Training Institute courses (8,500 ETB each) exist in Firestore
+          // Ensure all 18 administrator-approved Zacma Training Institute courses (8,500 ETB each) exist in Zacma HQ
           const existingCoursesSnap = await getDocs(
-            query(collection(db, 'publicCourses'), where('organizationId', '==', orgId))
+            query(collection(db, 'publicCourses'), where('organizationId', '==', DEFAULT_ORG_ID))
           );
           const existingCoursesList = existingCoursesSnap.docs.map(
             (d) => d.data() as TrainingCourse
           );
           await seedEighteenInstituteCourses({
-            organizationId: orgId,
+            organizationId: DEFAULT_ORG_ID,
             ownerId: firebaseUser.uid,
             authorizedUserIds: [firebaseUser.uid],
             existingCourses: existingCoursesList,
@@ -316,7 +360,122 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => unsub();
   }, []);
 
-  // 2. Real-time Firestore listeners scoped strictly to the authenticated user & organization
+  // 1b. Live UserProfile listener so workspace switches & new tenant provisioning update immediately
+  useEffect(() => {
+    if (!user) return;
+    const unsub = onSnapshot(
+      doc(db, `users/${user.uid}`),
+      (snap) => {
+        if (snap.exists()) {
+          setProfile(snap.data() as UserProfile);
+        }
+      },
+      (err) => {
+        console.warn('User profile listener warning:', err.message);
+      }
+    );
+    return () => unsub();
+  }, [user]);
+
+  // 1c. Global SaaS Plans, Owned Organizations, Tenant Subscriptions, Invoices & Sales Inquiries listeners
+  useEffect(() => {
+    if (!user) return;
+    const unsubs: Array<() => void> = [];
+
+    // Commercial SaaS Plans
+    const plansQuery = isBootstrapSuper
+      ? collection(db, 'saasPlans')
+      : query(collection(db, 'saasPlans'), where('isActive', '==', true));
+    unsubs.push(
+      onSnapshot(
+        plansQuery,
+        (snap) => {
+          if (!snap.empty) {
+            const list = snap.docs
+              .map((d) => d.data() as SaasPlan)
+              .sort((a, b) => a.sortOrder - b.sortOrder);
+            setSaasPlans(list);
+          }
+        },
+        (err) => console.warn('SaaS plans read skipped:', err.message)
+      )
+    );
+
+    // Accessible Organizations (enables Multi-Tenant Workspace Switcher)
+    const orgsQuery = isBootstrapSuper
+      ? collection(db, 'organizations')
+      : query(collection(db, 'organizations'), where('authorizedUserIds', 'array-contains', user.uid));
+    unsubs.push(
+      onSnapshot(
+        orgsQuery,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as Organization)
+            .sort((a, b) => a.name.localeCompare(b.name));
+          setMyOrganizations(list);
+        },
+        (err) => console.warn('Organizations list skipped:', err.message)
+      )
+    );
+
+    // Tenant Subscriptions
+    const tenantsQuery = isBootstrapSuper
+      ? collection(db, 'saasTenants')
+      : query(collection(db, 'saasTenants'), where('authorizedUserIds', 'array-contains', user.uid));
+    unsubs.push(
+      onSnapshot(
+        tenantsQuery,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as SaasTenantSubscription)
+            .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
+          setAllTenantSubscriptions(list);
+        },
+        (err) => console.warn('Tenant subscriptions skipped:', err.message)
+      )
+    );
+
+    // SaaS Invoices
+    const invoicesQuery = isBootstrapSuper
+      ? collection(db, 'saasInvoices')
+      : query(collection(db, 'saasInvoices'), where('ownerId', '==', user.uid));
+    unsubs.push(
+      onSnapshot(
+        invoicesQuery,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as SaasInvoice)
+            .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
+          setSaasInvoices(list);
+        },
+        (err) => console.warn('SaaS invoices skipped:', err.message)
+      )
+    );
+
+    // SaaS Buyer Inquiries (Platform Owner only)
+    if (isBootstrapSuper) {
+      unsubs.push(
+        onSnapshot(
+          collection(db, 'saasSalesInquiries'),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => d.data() as SaasSalesInquiry)
+              .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
+            setSaasSalesInquiries(list);
+          },
+          (err) => handleFirestoreError(err, OperationType.LIST, 'saasSalesInquiries')
+        )
+      );
+    } else {
+      setSaasSalesInquiries([]);
+    }
+
+    return () => {
+      unsubs.forEach((fn) => fn());
+    };
+  }, [user, isBootstrapSuper]);
+
+  // 2. Real-time Firestore listeners scoped strictly to the active organization
   const orgId = profile?.organizationId || DEFAULT_ORG_ID;
 
   useEffect(() => {
@@ -331,7 +490,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         : query(ref, where('authorizedUserIds', 'array-contains', user.uid));
     };
 
-    // Organization doc
+    // Active Organization doc
     unsubs.push(
       onSnapshot(
         doc(db, `organizations/${orgId}`),
@@ -339,8 +498,23 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           setOrganization(snap.exists() ? (snap.data() as Organization) : null);
         },
         (err) => {
-          console.warn('Org read skipped (user may await invite):', err.message);
+          console.warn('Org read skipped (user may await invite or create workspace):', err.message);
           setOrganization(null);
+        }
+      )
+    );
+
+    // Active Tenant Subscription doc
+    unsubs.push(
+      onSnapshot(
+        doc(db, `saasTenants/${orgId}`),
+        (snap) => {
+          setCurrentTenantSubscription(
+            snap.exists() ? (snap.data() as SaasTenantSubscription) : null
+          );
+        },
+        () => {
+          setCurrentTenantSubscription(null);
         }
       )
     );
@@ -462,7 +636,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       )
     );
 
-    // Section 8: Institute Courses Catalog
+    // Section 8: Courses Catalog scoped to active org
     const coursesQuery = isBootstrapSuper
       ? query(collection(db, 'publicCourses'), where('organizationId', '==', orgId))
       : query(
@@ -483,7 +657,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       )
     );
 
-    // Section 8: Support Knowledge & FAQs
+    // Section 8: Support Knowledge & FAQs scoped to active org
     const faqsQuery = isBootstrapSuper
       ? query(collection(db, 'publicFaqs'), where('organizationId', '==', orgId))
       : query(
@@ -537,9 +711,9 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, profile, orgId, isBootstrapSuper]);
+  }, [user, profile?.organizationId, orgId, isBootstrapSuper]);
 
-  // 3. Per-Business-Unit dynamic forms listeners (preserving Phase 9 nested collection path)
+  // 3. Per-Business-Unit dynamic forms listeners
   useEffect(() => {
     if (!user || !profile || businessUnits.length === 0) {
       setFormsByUnit({});
@@ -571,7 +745,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, profile, orgId, businessUnits, isBootstrapSuper]);
+  }, [user, profile?.organizationId, orgId, businessUnits, isBootstrapSuper]);
 
   const forms = useMemo(() => {
     const unitIds = new Set(businessUnits.map((b) => b.id));
@@ -583,7 +757,13 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
 
   const currentMember = useMemo(() => {
     if (!user) return null;
-    return members.find((m) => m.userId === user.uid || (user.email && m.email.toLowerCase() === user.email.toLowerCase())) || null;
+    return (
+      members.find(
+        (m) =>
+          m.userId === user.uid ||
+          (user.email && m.email.toLowerCase() === user.email.toLowerCase())
+      ) || null
+    );
   }, [members, user]);
 
   const effectiveRole: UserRole = isBootstrapSuper
@@ -593,7 +773,8 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
   const effectiveCrmAccess = isBootstrapSuper
     ? true
     : currentMember
-      ? currentMember.crmAccess || ['super_admin', 'org_admin', 'bu_manager', 'staff'].includes(currentMember.role)
+      ? currentMember.crmAccess ||
+        ['super_admin', 'org_admin', 'bu_manager', 'staff'].includes(currentMember.role)
       : Boolean(profile?.crmAccess);
 
   const duplicateLeadMap = useMemo(() => {
@@ -617,6 +798,16 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const switchOrganization = async (targetOrgId: string) => {
+    if (!user) return;
+    await switchActiveOrganization({
+      uid: user.uid,
+      displayName: user.displayName || user.email || 'Workspace User',
+      photoURL: user.photoURL || '',
+      targetOrganizationId: targetOrgId,
+    });
+  };
+
   return (
     <PortalContext.Provider
       value={{
@@ -625,10 +816,12 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         dataLoading,
         profile,
         organization,
+        myOrganizations,
         currentMember,
         effectiveRole,
         effectiveCrmAccess,
         isSuperAdmin: effectiveRole === 'super_admin',
+        isPlatformOwner: isBootstrapSuper,
         members,
         businessUnits,
         forms,
@@ -644,9 +837,15 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         knowledgeItems,
         supportConversations,
         studentRegistrations,
+        saasPlans,
+        currentTenantSubscription,
+        allTenantSubscriptions,
+        saasInvoices,
+        saasSalesInquiries,
         signInWithGoogle,
         logout,
         markNotificationRead,
+        switchOrganization,
       }}
     >
       {children}

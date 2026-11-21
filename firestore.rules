@@ -513,6 +513,103 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidSaasPlan(data) {
+      return data.keys().hasAll(['id', 'code', 'name', 'audience', 'tagline', 'monthlyPriceEtb', 'monthlyPriceUsd', 'annualDiscountPercent', 'maxBusinessUnits', 'maxForms', 'maxLeads', 'maxStaffSeats', 'includesAiSupport', 'includesSmsEmailAi', 'includesWhiteLabel', 'features', 'isRecommended', 'isActive', 'sortOrder', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'code', 'name', 'audience', 'tagline', 'monthlyPriceEtb', 'monthlyPriceUsd', 'annualDiscountPercent', 'maxBusinessUnits', 'maxForms', 'maxLeads', 'maxStaffSeats', 'includesAiSupport', 'includesSmsEmailAi', 'includesWhiteLabel', 'features', 'isRecommended', 'isActive', 'sortOrder', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidPublicKey(data.code) &&
+        isNonEmptyString(data.name, 100) &&
+        isBoundedString(data.audience, 140) &&
+        isBoundedString(data.tagline, 240) &&
+        data.monthlyPriceEtb is number && data.monthlyPriceEtb >= 0 && data.monthlyPriceEtb <= 10000000 &&
+        data.monthlyPriceUsd is number && data.monthlyPriceUsd >= 0 && data.monthlyPriceUsd <= 100000 &&
+        data.annualDiscountPercent is number && data.annualDiscountPercent >= 0 && data.annualDiscountPercent <= 90 &&
+        data.maxBusinessUnits is number && data.maxBusinessUnits >= 1 && data.maxBusinessUnits <= 10000 &&
+        data.maxForms is number && data.maxForms >= 1 && data.maxForms <= 100000 &&
+        data.maxLeads is number && data.maxLeads >= 1 && data.maxLeads <= 10000000 &&
+        data.maxStaffSeats is number && data.maxStaffSeats >= 1 && data.maxStaffSeats <= 10000 &&
+        data.includesAiSupport is bool &&
+        data.includesSmsEmailAi is bool &&
+        data.includesWhiteLabel is bool &&
+        isBoundedStringList(data.features, 20) &&
+        data.isRecommended is bool &&
+        data.isActive is bool &&
+        data.sortOrder is number && data.sortOrder >= 0 && data.sortOrder <= 100 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaasTenantSubscription(data) {
+      return data.keys().hasAll(['organizationId', 'organizationName', 'organizationSlug', 'industry', 'ownerId', 'ownerName', 'ownerEmail', 'billingPhone', 'planId', 'planName', 'requestedPlanId', 'billingCycle', 'currency', 'mrrEtb', 'mrrUsd', 'status', 'paymentMethod', 'paymentReference', 'trialEndsAt', 'currentPeriodEnd', 'maxBusinessUnits', 'maxForms', 'maxLeads', 'maxStaffSeats', 'adminNotes', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['organizationId', 'organizationName', 'organizationSlug', 'industry', 'ownerId', 'ownerName', 'ownerEmail', 'billingPhone', 'planId', 'planName', 'requestedPlanId', 'billingCycle', 'currency', 'mrrEtb', 'mrrUsd', 'status', 'paymentMethod', 'paymentReference', 'trialEndsAt', 'currentPeriodEnd', 'maxBusinessUnits', 'maxForms', 'maxLeads', 'maxStaffSeats', 'adminNotes', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.organizationId) &&
+        isNonEmptyString(data.organizationName, 140) &&
+        isValidSlug(data.organizationSlug) &&
+        isBoundedString(data.industry, 100) &&
+        isValidId(data.ownerId) &&
+        isBoundedString(data.ownerName, 140) &&
+        isBoundedString(data.ownerEmail, 200) &&
+        isBoundedString(data.billingPhone, 60) &&
+        isNonEmptyString(data.planId, 128) &&
+        isNonEmptyString(data.planName, 100) &&
+        isBoundedString(data.requestedPlanId, 128) &&
+        data.billingCycle in ['monthly', 'annual'] &&
+        data.currency in ['ETB', 'USD'] &&
+        data.mrrEtb is number && data.mrrEtb >= 0 && data.mrrEtb <= 10000000 &&
+        data.mrrUsd is number && data.mrrUsd >= 0 && data.mrrUsd <= 100000 &&
+        data.status in ['trial', 'active', 'past_due', 'suspended', 'cancelled'] &&
+        data.paymentMethod in ['trial', 'telebirr', 'cbe_bank', 'chapa_card', 'stripe_card', 'invoice'] &&
+        isBoundedString(data.paymentReference, 140) &&
+        isBoundedString(data.trialEndsAt, 40) &&
+        isBoundedString(data.currentPeriodEnd, 40) &&
+        data.maxBusinessUnits is number && data.maxBusinessUnits >= 1 && data.maxBusinessUnits <= 10000 &&
+        data.maxForms is number && data.maxForms >= 1 && data.maxForms <= 100000 &&
+        data.maxLeads is number && data.maxLeads >= 1 && data.maxLeads <= 10000000 &&
+        data.maxStaffSeats is number && data.maxStaffSeats >= 1 && data.maxStaffSeats <= 10000 &&
+        isBoundedString(data.adminNotes, 1500) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaasInvoice(data) {
+      return data.keys().hasAll(['id', 'invoiceNumber', 'organizationId', 'organizationName', 'ownerId', 'planId', 'planName', 'billingCycle', 'amountEtb', 'amountUsd', 'paymentMethod', 'paymentReference', 'status', 'notes', 'issuedAt', 'paidAt', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'invoiceNumber', 'organizationId', 'organizationName', 'ownerId', 'planId', 'planName', 'billingCycle', 'amountEtb', 'amountUsd', 'paymentMethod', 'paymentReference', 'status', 'notes', 'issuedAt', 'paidAt', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.invoiceNumber, 40) &&
+        isValidId(data.organizationId) &&
+        isNonEmptyString(data.organizationName, 140) &&
+        isValidId(data.ownerId) &&
+        isNonEmptyString(data.planId, 128) &&
+        isNonEmptyString(data.planName, 100) &&
+        data.billingCycle in ['monthly', 'annual'] &&
+        data.amountEtb is number && data.amountEtb >= 0 && data.amountEtb <= 100000000 &&
+        data.amountUsd is number && data.amountUsd >= 0 && data.amountUsd <= 1000000 &&
+        data.paymentMethod in ['telebirr', 'cbe_bank', 'chapa_card', 'stripe_card', 'invoice'] &&
+        isBoundedString(data.paymentReference, 140) &&
+        data.status in ['pending_verification', 'paid', 'void'] &&
+        isBoundedString(data.notes, 800) &&
+        isNonEmptyString(data.issuedAt, 40) &&
+        isBoundedString(data.paidAt, 40) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSaasSalesInquiry(data) {
+      return data.keys().hasAll(['id', 'companyName', 'contactName', 'email', 'phone', 'industry', 'branchCount', 'interestedPlan', 'message', 'status', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'companyName', 'contactName', 'email', 'phone', 'industry', 'branchCount', 'interestedPlan', 'message', 'status', 'createdAt']) &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.companyName, 140) &&
+        isNonEmptyString(data.contactName, 140) &&
+        isBoundedString(data.email, 200) &&
+        isBoundedString(data.phone, 60) &&
+        isBoundedString(data.industry, 100) &&
+        isBoundedString(data.branchCount, 40) &&
+        isBoundedString(data.interestedPlan, 100) &&
+        isBoundedString(data.message, 1500) &&
+        data.status in ['new', 'contacted', 'converted', 'closed'] &&
+        data.createdAt is timestamp;
+    }
+
     // =========================================================================
     // PUBLIC FORM & AI SUPPORT HELPERS
     // =========================================================================
@@ -563,9 +660,121 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           (isBootstrapSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'organizationId', 'role', 'crmAccess', 'updatedAt'])) ||
-          (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']))
+          (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt'])) ||
+          (
+            request.auth.uid == userId &&
+            incoming().role == 'super_admin' &&
+            incoming().crmAccess == true &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'organizationId', 'role', 'crmAccess', 'updatedAt']) &&
+            existsAfter(/databases/$(database)/documents/organizations/$(incoming().organizationId)) &&
+            getAfter(/databases/$(database)/documents/organizations/$(incoming().organizationId)).data.ownerId == request.auth.uid
+          )
         );
       allow delete: if false;
+    }
+
+    // =========================================================================
+    // COMMERCIAL SAAS PLATFORM: PLANS, TENANT SUBSCRIPTIONS, INVOICES & SALES
+    // =========================================================================
+
+    match /saasPlans/{planId} {
+      allow get: if isValidId(planId) && (
+        existing().isActive == true || isBootstrapSuperAdmin()
+      );
+      allow list: if existing().isActive == true || isBootstrapSuperAdmin();
+      allow create: if isValidId(planId) && isBootstrapSuperAdmin() &&
+        isValidSaasPlan(incoming()) &&
+        incoming().id == planId &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(planId) && isBootstrapSuperAdmin() &&
+        isValidSaasPlan(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['code', 'name', 'audience', 'tagline', 'monthlyPriceEtb', 'monthlyPriceUsd', 'annualDiscountPercent', 'maxBusinessUnits', 'maxForms', 'maxLeads', 'maxStaffSeats', 'includesAiSupport', 'includesSmsEmailAi', 'includesWhiteLabel', 'features', 'isRecommended', 'isActive', 'sortOrder', 'updatedAt']);
+      allow delete: if isValidId(planId) && isBootstrapSuperAdmin();
+    }
+
+    match /saasTenants/{organizationId} {
+      allow get: if isValidId(organizationId) && canReadOrgRecord(existing());
+      allow list: if isSignedIn() && canReadOrgRecord(existing());
+      allow create: if isValidId(organizationId) && isVerifiedUser() &&
+        isValidSaasTenantSubscription(incoming()) &&
+        incoming().organizationId == organizationId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/organizations/$(organizationId)) && (
+          isBootstrapSuperAdmin() || (
+            incoming().ownerId == request.auth.uid &&
+            request.auth.uid in incoming().authorizedUserIds &&
+            incoming().status == 'trial' &&
+            getAfter(/databases/$(database)/documents/organizations/$(organizationId)).data.ownerId == request.auth.uid
+          )
+        );
+      allow update: if isValidId(organizationId) && isVerifiedUser() &&
+        isValidSaasTenantSubscription(incoming()) &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (
+            isBootstrapSuperAdmin() &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['organizationName', 'industry', 'ownerName', 'ownerEmail', 'billingPhone', 'planId', 'planName', 'requestedPlanId', 'billingCycle', 'currency', 'mrrEtb', 'mrrUsd', 'status', 'paymentMethod', 'paymentReference', 'trialEndsAt', 'currentPeriodEnd', 'maxBusinessUnits', 'maxForms', 'maxLeads', 'maxStaffSeats', 'adminNotes', 'authorizedUserIds', 'updatedAt'])
+          ) || (
+            existing().ownerId == request.auth.uid &&
+            existing().status != 'suspended' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['organizationName', 'industry', 'billingPhone', 'requestedPlanId', 'billingCycle', 'currency', 'paymentMethod', 'paymentReference', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(organizationId) && isBootstrapSuperAdmin();
+    }
+
+    match /saasInvoices/{invoiceId} {
+      allow get: if isValidId(invoiceId) && (
+        isBootstrapSuperAdmin() ||
+        (isSignedIn() && existing().ownerId == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (
+        isBootstrapSuperAdmin() ||
+        existing().ownerId == request.auth.uid
+      );
+      allow create: if isValidId(invoiceId) && isVerifiedUser() &&
+        isValidSaasInvoice(incoming()) &&
+        incoming().id == invoiceId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/saasTenants/$(incoming().organizationId)) && (
+          isBootstrapSuperAdmin() || (
+            incoming().ownerId == request.auth.uid &&
+            incoming().status == 'pending_verification' &&
+            incoming().paidAt == '' &&
+            get(/databases/$(database)/documents/saasTenants/$(incoming().organizationId)).data.ownerId == request.auth.uid
+          )
+        );
+      allow update: if isValidId(invoiceId) && isBootstrapSuperAdmin() &&
+        isValidSaasInvoice(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'paymentReference', 'paymentMethod', 'notes', 'paidAt', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /saasSalesInquiries/{inquiryId} {
+      allow get: if isValidId(inquiryId) && isBootstrapSuperAdmin();
+      allow list: if isBootstrapSuperAdmin();
+      allow create: if isValidId(inquiryId) &&
+        isValidSaasSalesInquiry(incoming()) &&
+        incoming().id == inquiryId &&
+        incoming().status == 'new' &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(inquiryId) && isBootstrapSuperAdmin() &&
+        isValidSaasSalesInquiry(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+      allow delete: if isValidId(inquiryId) && isBootstrapSuperAdmin();
     }
 
     // =========================================================================

@@ -463,12 +463,137 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "organizationId", "businessUnitId", "leadId", "leadRef", "studentUid", "fullName", "phone", "email", "address", "preferredCourse", "deliveryMethod", "preferredSchedule", "paymentMethod", "registrationStatus", "batchName", "classSchedule", "trainingLocation", "paymentStatus", "certificateStatus", "documentUploadFormUrl", "source", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "SaasPlan": {
+      "title": "SaasPlan",
+      "description": "Commercial SaaS subscription tier sold to external business owners.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "maxLength": 40, "pattern": "^[a-z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "audience": { "type": "string", "maxLength": 140 },
+        "tagline": { "type": "string", "maxLength": 240 },
+        "monthlyPriceEtb": { "type": "number" },
+        "monthlyPriceUsd": { "type": "number" },
+        "annualDiscountPercent": { "type": "number" },
+        "maxBusinessUnits": { "type": "number" },
+        "maxForms": { "type": "number" },
+        "maxLeads": { "type": "number" },
+        "maxStaffSeats": { "type": "number" },
+        "includesAiSupport": { "type": "boolean" },
+        "includesSmsEmailAi": { "type": "boolean" },
+        "includesWhiteLabel": { "type": "boolean" },
+        "features": { "type": "array" },
+        "isRecommended": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "code", "name", "audience", "tagline", "monthlyPriceEtb", "monthlyPriceUsd", "annualDiscountPercent", "maxBusinessUnits", "maxForms", "maxLeads", "maxStaffSeats", "includesAiSupport", "includesSmsEmailAi", "includesWhiteLabel", "features", "isRecommended", "isActive", "sortOrder", "updatedAt"]
+    },
+    "SaasTenantSubscription": {
+      "title": "SaasTenantSubscription",
+      "description": "Multi-tenant SaaS subscription, plan quotas, and billing status for a client business organization.",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "organizationSlug": { "type": "string", "maxLength": 90, "pattern": "^[a-z0-9\\-]+$" },
+        "industry": { "type": "string", "maxLength": 100 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerName": { "type": "string", "maxLength": 140 },
+        "ownerEmail": { "type": "string", "maxLength": 200 },
+        "billingPhone": { "type": "string", "maxLength": 60 },
+        "planId": { "type": "string", "maxLength": 128 },
+        "planName": { "type": "string", "maxLength": 100 },
+        "requestedPlanId": { "type": "string", "maxLength": 128 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "annual"] },
+        "currency": { "type": "string", "enum": ["ETB", "USD"] },
+        "mrrEtb": { "type": "number" },
+        "mrrUsd": { "type": "number" },
+        "status": { "type": "string", "enum": ["trial", "active", "past_due", "suspended", "cancelled"] },
+        "paymentMethod": { "type": "string", "enum": ["trial", "telebirr", "cbe_bank", "chapa_card", "stripe_card", "invoice"] },
+        "paymentReference": { "type": "string", "maxLength": 140 },
+        "trialEndsAt": { "type": "string", "maxLength": 40 },
+        "currentPeriodEnd": { "type": "string", "maxLength": 40 },
+        "maxBusinessUnits": { "type": "number" },
+        "maxForms": { "type": "number" },
+        "maxLeads": { "type": "number" },
+        "maxStaffSeats": { "type": "number" },
+        "adminNotes": { "type": "string", "maxLength": 1500 },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["organizationId", "organizationName", "organizationSlug", "industry", "ownerId", "ownerName", "ownerEmail", "billingPhone", "planId", "planName", "requestedPlanId", "billingCycle", "currency", "mrrEtb", "mrrUsd", "status", "paymentMethod", "paymentReference", "trialEndsAt", "currentPeriodEnd", "maxBusinessUnits", "maxForms", "maxLeads", "maxStaffSeats", "adminNotes", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "SaasInvoice": {
+      "title": "SaasInvoice",
+      "description": "Subscription billing invoice and payment receipt record for a client tenant.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "invoiceNumber": { "type": "string", "maxLength": 40 },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationName": { "type": "string", "maxLength": 140 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "planId": { "type": "string", "maxLength": 128 },
+        "planName": { "type": "string", "maxLength": 100 },
+        "billingCycle": { "type": "string", "enum": ["monthly", "annual"] },
+        "amountEtb": { "type": "number" },
+        "amountUsd": { "type": "number" },
+        "paymentMethod": { "type": "string", "enum": ["telebirr", "cbe_bank", "chapa_card", "stripe_card", "invoice"] },
+        "paymentReference": { "type": "string", "maxLength": 140 },
+        "status": { "type": "string", "enum": ["pending_verification", "paid", "void"] },
+        "notes": { "type": "string", "maxLength": 800 },
+        "issuedAt": { "type": "string", "maxLength": 40 },
+        "paidAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "invoiceNumber", "organizationId", "organizationName", "ownerId", "planId", "planName", "billingCycle", "amountEtb", "amountUsd", "paymentMethod", "paymentReference", "status", "notes", "issuedAt", "paidAt", "createdAt", "updatedAt"]
+    },
+    "SaasSalesInquiry": {
+      "title": "SaasSalesInquiry",
+      "description": "Public prospective business owner inquiry for SaaS subscription or enterprise onboarding.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "contactName": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 60 },
+        "industry": { "type": "string", "maxLength": 100 },
+        "branchCount": { "type": "string", "maxLength": 40 },
+        "interestedPlan": { "type": "string", "maxLength": 100 },
+        "message": { "type": "string", "maxLength": 1500 },
+        "status": { "type": "string", "enum": ["new", "contacted", "converted", "closed"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "companyName", "contactName", "email", "phone", "industry", "branchCount", "interestedPlan", "message", "status", "createdAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "User profile and default organization reference (PII isolated to owner or Super Admin)."
+    },
+    "/saasPlans/{planId}": {
+      "schema": { "$ref": "#/entities/SaasPlan" },
+      "description": "Publicly readable commercial SaaS pricing tiers editable by the Platform Owner."
+    },
+    "/saasTenants/{organizationId}": {
+      "schema": { "$ref": "#/entities/SaasTenantSubscription" },
+      "description": "Tenant subscription, quota limits, trial dates, and billing metadata per client organization."
+    },
+    "/saasInvoices/{invoiceId}": {
+      "schema": { "$ref": "#/entities/SaasInvoice" },
+      "description": "Tenant subscription billing invoices and payment verification receipts."
+    },
+    "/saasSalesInquiries/{inquiryId}": {
+      "schema": { "$ref": "#/entities/SaasSalesInquiry" },
+      "description": "Inbound SaaS buyer demo and enterprise onboarding inquiries from the public storefront."
     },
     "/publicForms/{publicSlugKey}": {
       "schema": { "$ref": "#/entities/PublicFormProjection" },

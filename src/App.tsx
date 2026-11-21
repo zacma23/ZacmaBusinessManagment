@@ -29,11 +29,16 @@ import {
   BookOpen,
   HelpCircle,
   Headphones,
+  Store,
+  CreditCard,
+  ChevronsUpDown,
 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PortalProvider, usePortal } from './context/PortalContext';
 import { AuthGate } from './components/AuthGate';
 import { PublicFormView } from './components/PublicFormView';
+import { SaasStorefront } from './components/SaasStorefront';
+import { SaasPlatformModule } from './components/SaasPlatformModule';
 import { DashboardAndReportsModule } from './components/DashboardAndReportsModule';
 import { BusinessUnitsModule } from './components/BusinessUnitsModule';
 import { StaffAccessModule } from './components/StaffAccessModule';
@@ -53,6 +58,10 @@ function parsePublicFormRoute(): { businessUnitSlug: string; formSlug: string } 
     return { businessUnitSlug: match[1].toLowerCase(), formSlug: match[2].toLowerCase() };
   }
   return null;
+}
+
+function isStorefrontPath(): boolean {
+  return /^\/(pricing|saas|plans)\/?$/i.test(window.location.pathname);
 }
 
 interface NavGroup {
@@ -87,16 +96,22 @@ const SECTION_BREADCRUMBS: Record<NavSection, [string, string]> = {
   ai_support_knowledge: ['AI Customer Support', 'Support Knowledge & FAQs'],
   ai_support_inbox: ['AI Customer Support', 'Support Inbox & Registrations'],
   integrations_security: ['Governance', 'Integrations & Security'],
+  saas_platform_console: ['SaaS Platform', 'Platform SaaS Console'],
+  tenant_billing: ['SaaS Platform', 'Billing & Subscription'],
 };
 
-function PortalWorkspace() {
+function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void }) {
   const {
     user,
     organization,
+    myOrganizations,
+    currentTenantSubscription,
     effectiveRole,
     effectiveCrmAccess,
+    isPlatformOwner,
     notifications,
     markNotificationRead,
+    switchOrganization,
     logout,
   } = usePortal();
 
@@ -104,6 +119,7 @@ function PortalWorkspace() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [switchingOrg, setSwitchingOrg] = useState(false);
 
   // Cross-module contextual navigation presets
   const [selectedBuPreset, setSelectedBuPreset] = useState<string | undefined>(undefined);
@@ -166,13 +182,20 @@ function PortalWorkspace() {
         ],
       },
       {
+        title: 'SaaS Platform',
+        items: [
+          { id: 'saas_platform_console', label: 'Platform SaaS Console', icon: Store, visible: isPlatformOwner },
+          { id: 'tenant_billing', label: 'Billing & Plan', icon: CreditCard, visible: canManageOrgFlag },
+        ],
+      },
+      {
         title: 'Governance',
         items: [
           { id: 'integrations_security', label: 'Integrations & Security', icon: ShieldCheck, visible: canManageOrgFlag },
         ],
       },
     ],
-    [canManageFormsFlag, canManageOrgFlag, effectiveCrmAccess]
+    [canManageFormsFlag, canManageOrgFlag, effectiveCrmAccess, isPlatformOwner]
   );
 
   const handleNavigate = (
@@ -201,6 +224,16 @@ function PortalWorkspace() {
     setMobileMenuOpen(false);
   };
 
+  const handleOrgSwitch = async (targetOrgId: string) => {
+    if (!targetOrgId || targetOrgId === organization?.id) return;
+    setSwitchingOrg(true);
+    try {
+      await switchOrganization(targetOrgId);
+    } finally {
+      setSwitchingOrg(false);
+    }
+  };
+
   const unreadCount = notifications.filter((n) => !n.isRead).length;
   const [groupLabel, pageLabel] = SECTION_BREADCRUMBS[activeSection];
 
@@ -209,8 +242,11 @@ function PortalWorkspace() {
       {/* Brand Header */}
       <div className="h-16 px-5 border-b border-slate-200 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-blue-700 text-white font-display font-bold text-base flex items-center justify-center shrink-0">
-            Z
+          <div
+            className="w-8 h-8 rounded-lg text-white font-display font-bold text-base flex items-center justify-center shrink-0"
+            style={{ backgroundColor: organization?.primaryColor || '#1D4ED8' }}
+          >
+            {(organization?.name || 'Z').charAt(0).toUpperCase()}
           </div>
           <span className="font-display font-bold text-base tracking-tight text-slate-900 truncate">
             {organization?.name || 'Zacma Portal'}
@@ -224,6 +260,35 @@ function PortalWorkspace() {
           <X className="w-5 h-5" />
         </button>
       </div>
+
+      {/* Multi-Tenant Workspace Switcher */}
+      {(myOrganizations.length > 1 || isPlatformOwner) && (
+        <div className="px-3 py-2.5 border-b border-slate-200 bg-slate-50/70 shrink-0">
+          <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1 px-1">
+            <span>Active Workspace</span>
+            {currentTenantSubscription && (
+              <span className="font-medium text-blue-700 truncate max-w-[110px]">
+                {currentTenantSubscription.planName}
+              </span>
+            )}
+          </div>
+          <div className="relative">
+            <select
+              disabled={switchingOrg}
+              value={organization?.id || ''}
+              onChange={(e) => void handleOrgSwitch(e.target.value)}
+              className="w-full appearance-none pl-2.5 pr-7 py-1.5 text-xs font-semibold text-slate-800 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 cursor-pointer"
+            >
+              {myOrganizations.map((org) => (
+                <option key={org.id} value={org.id}>
+                  {org.name}
+                </option>
+              ))}
+            </select>
+            <ChevronsUpDown className="w-3.5 h-3.5 text-slate-400 pointer-events-none absolute right-2 top-1/2 -translate-y-1/2" />
+          </div>
+        </div>
+      )}
 
       {/* Navigation Groups */}
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
@@ -259,6 +324,18 @@ function PortalWorkspace() {
             </div>
           );
         })}
+
+        {/* Quick link to Public SaaS Storefront */}
+        <div className="pt-2 border-t border-slate-100">
+          <button
+            type="button"
+            onClick={onOpenStorefront}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 rounded-lg transition-colors cursor-pointer"
+          >
+            <Globe className="w-4 h-4 shrink-0 text-slate-400" />
+            <span className="truncate">SaaS Storefront (/pricing)</span>
+          </button>
+        </div>
       </nav>
 
       {/* Account Footer */}
@@ -269,7 +346,7 @@ function PortalWorkspace() {
               {user?.displayName || user?.email}
             </div>
             <div className="text-[11px] text-slate-500 capitalize">
-              {effectiveRole.replace('_', ' ')}
+              {isPlatformOwner ? 'Platform Owner' : effectiveRole.replace('_', ' ')}
             </div>
           </div>
           <button
@@ -467,13 +544,17 @@ function PortalWorkspace() {
                     directName: reg.fullName,
                     directEmail: reg.email,
                     directPhone: reg.phone,
-                    subject: `Zacma Training Institute — ${reg.preferredCourse} (${reg.leadRef})`,
-                    body: `Dear ${reg.fullName},\n\nThank you for registering for ${reg.preferredCourse} at Zacma Technology Training Institute (Ref: ${reg.leadRef}). Tuition is 8,500 ETB. Please reply if you need assistance with your schedule or payment.\n\nWarm regards,\nZacma Admissions`,
-                    smsBody: `Hi ${reg.fullName}, update from Zacma Training Institute on ${reg.preferredCourse} (Ref: ${reg.leadRef}). Tuition: 8,500 ETB.`,
+                    subject: `${organization?.name || 'Zacma Training Institute'} — ${reg.preferredCourse} (${reg.leadRef})`,
+                    body: `Dear ${reg.fullName},\n\nThank you for registering for ${reg.preferredCourse} at ${organization?.name || 'Zacma Technology Training Institute'} (Ref: ${reg.leadRef}). Tuition is 8,500 ETB. Please reply if you need assistance with your schedule or payment.\n\nWarm regards,\nAdmissions Team`,
+                    smsBody: `Hi ${reg.fullName}, update from ${organization?.name || 'Zacma Training Institute'} on ${reg.preferredCourse} (Ref: ${reg.leadRef}). Tuition: 8,500 ETB.`,
                   },
                 })
               }
             />
+          )}
+
+          {(activeSection === 'saas_platform_console' || activeSection === 'tenant_billing') && (
+            <SaasPlatformModule mode={activeSection} onOpenStorefront={onOpenStorefront} />
           )}
 
           {activeSection === 'integrations_security' && <IntegrationsSecurityModule />}
@@ -487,12 +568,55 @@ function PortalWorkspace() {
         onExecuteAction={handleNavigate}
       />
 
-      {/* Section 8: Floating 24/7 ZACMA AI ASSISTANT Customer Support & Student Widget */}
+      {/* Section 8: Floating 24/7 AI Customer Support & Student Widget scoped to active tenant */}
       <SupportChatWidget
         organizationId={organization?.id || 'zacma-hq'}
         isPortalContext
       />
     </div>
+  );
+}
+
+function PortalShell() {
+  const { user } = usePortal();
+  const [showStorefront, setShowStorefront] = useState<boolean>(() => isStorefrontPath());
+
+  const openStorefront = () => {
+    setShowStorefront(true);
+    try {
+      window.history.pushState({}, '', '/pricing');
+    } catch {
+      // Ignore history pushState restriction in sandboxed iframe
+    }
+  };
+
+  const openPortal = () => {
+    setShowStorefront(false);
+    try {
+      if (isStorefrontPath()) {
+        window.history.pushState({}, '', '/');
+      }
+    } catch {
+      // Ignore history pushState restriction
+    }
+  };
+
+  if (showStorefront) {
+    return (
+      <SaasStorefront
+        onOpenPortal={openPortal}
+        onTenantProvisioned={() => openPortal()}
+        isSignedIn={Boolean(user)}
+        userDisplayName={user?.displayName || undefined}
+        userEmail={user?.email || undefined}
+      />
+    );
+  }
+
+  return (
+    <AuthGate onOpenStorefront={openStorefront}>
+      <PortalWorkspace onOpenStorefront={openStorefront} />
+    </AuthGate>
   );
 }
 
@@ -513,9 +637,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <PortalProvider>
-        <AuthGate>
-          <PortalWorkspace />
-        </AuthGate>
+        <PortalShell />
       </PortalProvider>
     </ErrorBoundary>
   );

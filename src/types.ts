@@ -465,6 +465,98 @@ export interface RegistrationDraft {
   readyForConfirmation?: boolean;
 }
 
+export interface SaasPlan {
+  id: string;
+  code: string;
+  name: string;
+  audience: string;
+  tagline: string;
+  monthlyPriceEtb: number;
+  monthlyPriceUsd: number;
+  annualDiscountPercent: number;
+  maxBusinessUnits: number;
+  maxForms: number;
+  maxLeads: number;
+  maxStaffSeats: number;
+  includesAiSupport: boolean;
+  includesSmsEmailAi: boolean;
+  includesWhiteLabel: boolean;
+  features: string[];
+  isRecommended: boolean;
+  isActive: boolean;
+  sortOrder: number;
+  updatedAt: unknown;
+}
+
+export type SaasTenantStatus = 'trial' | 'active' | 'past_due' | 'suspended' | 'cancelled';
+export type SaasPaymentMethod = 'trial' | 'telebirr' | 'cbe_bank' | 'chapa_card' | 'stripe_card' | 'invoice';
+
+export interface SaasTenantSubscription {
+  organizationId: string;
+  organizationName: string;
+  organizationSlug: string;
+  industry: string;
+  ownerId: string;
+  ownerName: string;
+  ownerEmail: string;
+  billingPhone: string;
+  planId: string;
+  planName: string;
+  requestedPlanId: string;
+  billingCycle: 'monthly' | 'annual';
+  currency: 'ETB' | 'USD';
+  mrrEtb: number;
+  mrrUsd: number;
+  status: SaasTenantStatus;
+  paymentMethod: SaasPaymentMethod;
+  paymentReference: string;
+  trialEndsAt: string;
+  currentPeriodEnd: string;
+  maxBusinessUnits: number;
+  maxForms: number;
+  maxLeads: number;
+  maxStaffSeats: number;
+  adminNotes: string;
+  authorizedUserIds: string[];
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface SaasInvoice {
+  id: string;
+  invoiceNumber: string;
+  organizationId: string;
+  organizationName: string;
+  ownerId: string;
+  planId: string;
+  planName: string;
+  billingCycle: 'monthly' | 'annual';
+  amountEtb: number;
+  amountUsd: number;
+  paymentMethod: Exclude<SaasPaymentMethod, 'trial'>;
+  paymentReference: string;
+  status: 'pending_verification' | 'paid' | 'void';
+  notes: string;
+  issuedAt: string;
+  paidAt: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface SaasSalesInquiry {
+  id: string;
+  companyName: string;
+  contactName: string;
+  email: string;
+  phone: string;
+  industry: string;
+  branchCount: string;
+  interestedPlan: string;
+  message: string;
+  status: 'new' | 'contacted' | 'converted' | 'closed';
+  createdAt: unknown;
+}
+
 export type NavSection =
   | 'business_overview'
   | 'business_units'
@@ -486,7 +578,9 @@ export type NavSection =
   | 'ai_support_courses'
   | 'ai_support_knowledge'
   | 'ai_support_inbox'
-  | 'integrations_security';
+  | 'integrations_security'
+  | 'saas_platform_console'
+  | 'tenant_billing';
 
 export interface LeadFilterPreset {
   businessUnitId?: string;
