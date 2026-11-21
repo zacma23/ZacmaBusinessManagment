@@ -1,0 +1,401 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated Zacma user profile and default organization binding.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor"] },
+        "crmAccess": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "organizationId", "role", "crmAccess", "createdAt", "updatedAt"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "Top-level Zacma tenant organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "slug": { "type": "string", "minLength": 2, "maxLength": 80, "pattern": "^[a-z0-9\\-]+$" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "primaryColor": { "type": "string", "maxLength": 20 },
+        "secondaryColor": { "type": "string", "maxLength": 20 },
+        "duplicateMatchMode": { "type": "string", "enum": ["email_or_phone", "email_only", "phone_only", "email_and_phone"] },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "slug", "ownerId", "primaryColor", "secondaryColor", "duplicateMatchMode", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "OrganizationMember": {
+      "title": "OrganizationMember",
+      "description": "Role-based access membership record within an organization.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor"] },
+        "crmAccess": { "type": "boolean" },
+        "assignedBusinessUnitIds": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "inactive", "invited"] },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "organizationId", "email", "displayName", "role", "crmAccess", "assignedBusinessUnitIds", "status", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "BusinessUnit": {
+      "title": "BusinessUnit",
+      "description": "Dynamic independent business unit under a Zacma organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "slug": { "type": "string", "minLength": 2, "maxLength": 80, "pattern": "^[a-z0-9\\-]+$" },
+        "description": { "type": "string", "maxLength": 1500 },
+        "category": { "type": "string", "maxLength": 100 },
+        "services": { "type": "array" },
+        "logoUrl": { "type": "string", "maxLength": 250000 },
+        "brandColor": { "type": "string", "maxLength": 20 },
+        "contactEmail": { "type": "string", "maxLength": 200 },
+        "phoneNumber": { "type": "string", "maxLength": 50 },
+        "physicalAddress": { "type": "string", "maxLength": 300 },
+        "website": { "type": "string", "maxLength": 300 },
+        "assignedAdminIds": { "type": "array" },
+        "assignedStaffIds": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "name", "slug", "description", "category", "services", "logoUrl", "brandColor", "contactEmail", "phoneNumber", "physicalAddress", "website", "assignedAdminIds", "assignedStaffIds", "status", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "DynamicForm": {
+      "title": "DynamicForm",
+      "description": "AI-generated or visually edited form schema belonging to a business unit.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitSlug": { "type": "string", "maxLength": 80 },
+        "businessUnitName": { "type": "string", "maxLength": 140 },
+        "title": { "type": "string", "minLength": 2, "maxLength": 180 },
+        "slug": { "type": "string", "minLength": 2, "maxLength": 90, "pattern": "^[a-z0-9\\-]+$" },
+        "publicSlugKey": { "type": "string", "maxLength": 180, "pattern": "^[a-z0-9_\\-]+$" },
+        "description": { "type": "string", "maxLength": 1500 },
+        "fields": { "type": "array" },
+        "isPublished": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "submissionLimit": { "type": "number" },
+        "submissionCount": { "type": "number" },
+        "confirmationMessage": { "type": "string", "maxLength": 1000 },
+        "brandColor": { "type": "string", "maxLength": 20 },
+        "logoUrl": { "type": "string", "maxLength": 250000 },
+        "aiPrompt": { "type": "string", "maxLength": 2000 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "businessUnitId", "businessUnitSlug", "businessUnitName", "title", "slug", "publicSlugKey", "description", "fields", "isPublished", "isActive", "submissionLimit", "submissionCount", "confirmationMessage", "brandColor", "logoUrl", "aiPrompt", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "PublicFormProjection": {
+      "title": "PublicFormProjection",
+      "description": "Sanitized public-facing form projection exposing only intended public form fields.",
+      "type": "object",
+      "properties": {
+        "publicSlugKey": { "type": "string", "maxLength": 180, "pattern": "^[a-z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitSlug": { "type": "string", "maxLength": 80 },
+        "businessUnitName": { "type": "string", "maxLength": 140 },
+        "formId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "formSlug": { "type": "string", "maxLength": 90 },
+        "title": { "type": "string", "maxLength": 180 },
+        "description": { "type": "string", "maxLength": 1500 },
+        "fields": { "type": "array" },
+        "isPublished": { "type": "boolean" },
+        "isActive": { "type": "boolean" },
+        "submissionLimit": { "type": "number" },
+        "confirmationMessage": { "type": "string", "maxLength": 1000 },
+        "brandColor": { "type": "string", "maxLength": 20 },
+        "logoUrl": { "type": "string", "maxLength": 250000 },
+        "orgOwnerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["publicSlugKey", "organizationId", "businessUnitId", "businessUnitSlug", "businessUnitName", "formId", "formSlug", "title", "description", "fields", "isPublished", "isActive", "submissionLimit", "confirmationMessage", "brandColor", "logoUrl", "orgOwnerId", "updatedAt"]
+    },
+    "FormSubmission": {
+      "title": "FormSubmission",
+      "description": "Raw form submission record created by public visitors or staff.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitName": { "type": "string", "maxLength": 140 },
+        "formId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "formTitle": { "type": "string", "maxLength": 180 },
+        "publicSlugKey": { "type": "string", "maxLength": 180, "pattern": "^[a-z0-9_\\-]+$" },
+        "leadId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "leadRef": { "type": "string", "maxLength": 40 },
+        "responses": { "type": "object" },
+        "submitterName": { "type": "string", "maxLength": 160 },
+        "submitterEmail": { "type": "string", "maxLength": 200 },
+        "submitterPhone": { "type": "string", "maxLength": 60 },
+        "source": { "type": "string", "enum": ["public_form", "manual_entry", "portal_preview"] },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "businessUnitId", "businessUnitName", "formId", "formTitle", "publicSlugKey", "leadId", "leadRef", "responses", "submitterName", "submitterEmail", "submitterPhone", "source", "ownerId", "authorizedUserIds", "createdAt"]
+    },
+    "Lead": {
+      "title": "Lead",
+      "description": "Centralized CRM lead extracted from form submissions or added by staff.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "leadRef": { "type": "string", "maxLength": 40 },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitName": { "type": "string", "maxLength": 140 },
+        "formId": { "type": "string", "maxLength": 128 },
+        "formTitle": { "type": "string", "maxLength": 180 },
+        "submissionId": { "type": "string", "maxLength": 128 },
+        "publicSlugKey": { "type": "string", "maxLength": 180 },
+        "fullName": { "type": "string", "maxLength": 160 },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 60 },
+        "responses": { "type": "object" },
+        "source": { "type": "string", "maxLength": 80 },
+        "assignedStaffId": { "type": "string", "maxLength": 128 },
+        "assignedStaffName": { "type": "string", "maxLength": 120 },
+        "status": { "type": "string", "enum": ["new", "contacted", "interested", "converted", "lost", "archived"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high", "urgent"] },
+        "followUpDate": { "type": "string", "maxLength": 40 },
+        "lastContactAt": { "type": "string", "maxLength": 40 },
+        "internalNotes": { "type": "string", "maxLength": 5000 },
+        "attachments": { "type": "array" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "leadRef", "organizationId", "businessUnitId", "businessUnitName", "formId", "formTitle", "submissionId", "publicSlugKey", "fullName", "email", "phone", "responses", "source", "assignedStaffId", "assignedStaffName", "status", "priority", "followUpDate", "lastContactAt", "internalNotes", "attachments", "ownerId", "authorizedUserIds", "submittedAt", "createdAt", "updatedAt"]
+    },
+    "LeadActivity": {
+      "title": "LeadActivity",
+      "description": "Immutable timeline activity record for a lead.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "leadId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["submission", "status_change", "assignment", "note", "call", "meeting", "followup", "communication", "archive", "restore", "edit"] },
+        "summary": { "type": "string", "maxLength": 500 },
+        "details": { "type": "string", "maxLength": 2000 },
+        "actorId": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "leadId", "type", "summary", "details", "actorId", "actorName", "ownerId", "authorizedUserIds", "createdAt"]
+    },
+    "CommunicationRecord": {
+      "title": "CommunicationRecord",
+      "description": "Individual or bulk email/SMS communication log for a lead.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128 },
+        "leadId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "leadName": { "type": "string", "maxLength": 160 },
+        "channel": { "type": "string", "enum": ["email", "sms"] },
+        "recipient": { "type": "string", "maxLength": 200 },
+        "subject": { "type": "string", "maxLength": 250 },
+        "body": { "type": "string", "maxLength": 5000 },
+        "deliveryStatus": { "type": "string", "enum": ["sent", "queued_pending_provider_approval", "failed"] },
+        "provider": { "type": "string", "maxLength": 60 },
+        "senderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "maxLength": 120 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "businessUnitId", "leadId", "leadName", "channel", "recipient", "subject", "body", "deliveryStatus", "provider", "senderId", "senderName", "ownerId", "authorizedUserIds", "createdAt"]
+    },
+    "MessageTemplate": {
+      "title": "MessageTemplate",
+      "description": "Reusable personalized Email or SMS template.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "channel": { "type": "string", "enum": ["email", "sms"] },
+        "subject": { "type": "string", "maxLength": 250 },
+        "body": { "type": "string", "minLength": 2, "maxLength": 5000 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "businessUnitId", "name", "channel", "subject", "body", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "StaffAssignment": {
+      "title": "StaffAssignment",
+      "description": "Explicit mapping between staff members and business units.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["bu_manager", "staff"] },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "businessUnitId", "userId", "role", "ownerId", "authorizedUserIds", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "In-app notification for lead submissions and follow-up reminders.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recipientUserId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "maxLength": 180 },
+        "message": { "type": "string", "maxLength": 500 },
+        "entityType": { "type": "string", "enum": ["lead", "form", "followup", "integration"] },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "isRead": { "type": "boolean" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "recipientUserId", "title", "message", "entityType", "entityId", "isRead", "ownerId", "authorizedUserIds", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Append-only administrative and security audit trail.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "action": { "type": "string", "maxLength": 100 },
+        "resourceType": { "type": "string", "maxLength": 80 },
+        "resourceId": { "type": "string", "maxLength": 128 },
+        "summary": { "type": "string", "maxLength": 500 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "actorId", "actorName", "action", "resourceType", "resourceId", "summary", "ownerId", "authorizedUserIds", "createdAt"]
+    },
+    "IntegrationConfig": {
+      "title": "IntegrationConfig",
+      "description": "Provider governance and approval record (stores no secret API keys).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "providerKey": { "type": "string", "enum": ["gemini_ai", "resend_email", "twilio_sms", "whatsapp_cloud"] },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "purpose": { "type": "string", "maxLength": 500 },
+        "requiredCredentials": { "type": "array" },
+        "estimatedCost": { "type": "string", "maxLength": 300 },
+        "approvalStatus": { "type": "string", "enum": ["enabled", "pending_approval", "approved_awaiting_env", "disabled"] },
+        "approvedBy": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "providerKey", "displayName", "purpose", "requiredCredentials", "estimatedCost", "approvalStatus", "approvedBy", "ownerId", "authorizedUserIds", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile and default organization reference (PII isolated to owner or Super Admin)."
+    },
+    "/publicForms/{publicSlugKey}": {
+      "schema": { "$ref": "#/entities/PublicFormProjection" },
+      "description": "Sanitized public-facing form schemas readable by exact slug key when published and active."
+    },
+    "/organizations/{organizationId}": {
+      "schema": { "$ref": "#/entities/Organization" },
+      "description": "Root tenant organization records."
+    },
+    "/organizations/{organizationId}/members/{userId}": {
+      "schema": { "$ref": "#/entities/OrganizationMember" },
+      "description": "RBAC role and business unit membership records."
+    },
+    "/organizations/{organizationId}/businessUnits/{businessUnitId}": {
+      "schema": { "$ref": "#/entities/BusinessUnit" },
+      "description": "Dynamic business units managed by the organization."
+    },
+    "/organizations/{organizationId}/businessUnits/{businessUnitId}/forms/{formId}": {
+      "schema": { "$ref": "#/entities/DynamicForm" },
+      "description": "Business-unit-specific AI-generated and custom dynamic forms."
+    },
+    "/organizations/{organizationId}/leads/{leadId}": {
+      "schema": { "$ref": "#/entities/Lead" },
+      "description": "Centralized CRM leads extracted from forms or created by authorized staff."
+    },
+    "/organizations/{organizationId}/leads/{leadId}/activities/{activityId}": {
+      "schema": { "$ref": "#/entities/LeadActivity" },
+      "description": "Chronological audit timeline of lead actions."
+    },
+    "/organizations/{organizationId}/leads/{leadId}/communications/{communicationId}": {
+      "schema": { "$ref": "#/entities/CommunicationRecord" },
+      "description": "Individual and bulk SMS/Email communication history per lead."
+    },
+    "/organizations/{organizationId}/staffAssignments/{assignmentId}": {
+      "schema": { "$ref": "#/entities/StaffAssignment" },
+      "description": "Business unit staff assignment records."
+    },
+    "/organizations/{organizationId}/formSubmissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/FormSubmission" },
+      "description": "Raw visitor form submissions linked to extracted leads."
+    },
+    "/organizations/{organizationId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "In-app notifications for submissions and follow-ups."
+    },
+    "/organizations/{organizationId}/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable organization security and operational audit trail."
+    },
+    "/organizations/{organizationId}/integrations/{integrationId}": {
+      "schema": { "$ref": "#/entities/IntegrationConfig" },
+      "description": "Super Admin approval records for external communication APIs."
+    },
+    "/organizations/{organizationId}/messageTemplates/{templateId}": {
+      "schema": { "$ref": "#/entities/MessageTemplate" },
+      "description": "Reusable personalized Email and SMS message templates."
+    }
+  }
+}

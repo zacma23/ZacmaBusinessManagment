@@ -1,0 +1,843 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // GLOBAL PRIMITIVES & IDENTITY HELPERS
+    // =========================================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidSlug(slug) {
+      return slug is string && slug.size() >= 2 && slug.size() <= 90 && slug.matches('^[a-z0-9\\-]+$');
+    }
+
+    function isValidPublicKey(key) {
+      return key is string && key.size() >= 3 && key.size() <= 180 && key.matches('^[a-z0-9_\\-]+$');
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isBoundedString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isBoundedStringList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || arr[0] is string);
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isBootstrapSuperAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'zekimuluken@gmail.com';
+    }
+
+    function memberPath(orgId, uid) {
+      return /databases/$(database)/documents/organizations/$(orgId)/members/$(uid);
+    }
+
+    function hasMemberDoc(orgId) {
+      return isVerifiedUser() && exists(memberPath(orgId, request.auth.uid));
+    }
+
+    function getMemberRole(orgId) {
+      return get(memberPath(orgId, request.auth.uid)).data.role;
+    }
+
+    function isMemberActive(orgId) {
+      return hasMemberDoc(orgId) && get(memberPath(orgId, request.auth.uid)).data.status == 'active';
+    }
+
+    function isOrgSuperOrAdmin(orgId) {
+      return isBootstrapSuperAdmin() || (
+        isMemberActive(orgId) && (getMemberRole(orgId) == 'super_admin' || getMemberRole(orgId) == 'org_admin')
+      );
+    }
+
+    function isBuManagerFor(orgId, buId) {
+      return isMemberActive(orgId) &&
+        getMemberRole(orgId) == 'bu_manager' &&
+        buId in get(memberPath(orgId, request.auth.uid)).data.assignedBusinessUnitIds;
+    }
+
+    function isStaffForOrg(orgId) {
+      return isBootstrapSuperAdmin() || (
+        isMemberActive(orgId) && (
+          getMemberRole(orgId) == 'staff' ||
+          getMemberRole(orgId) == 'bu_manager' ||
+          getMemberRole(orgId) == 'org_admin' ||
+          getMemberRole(orgId) == 'super_admin' ||
+          get(memberPath(orgId, request.auth.uid)).data.crmAccess == true
+        )
+      );
+    }
+
+    function canReadOrgRecord(data) {
+      return isBootstrapSuperAdmin() || (
+        isSignedIn() && (
+          data.ownerId == request.auth.uid ||
+          request.auth.uid in data.authorizedUserIds
+        )
+      );
+    }
+
+    // =========================================================================
+    // ENTITY VALIDATION BLUEPRINTS (ANTI-UPDATE-GAP)
+    // =========================================================================
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        isBoundedString(data.email, 200) &&
+        isBoundedString(data.displayName, 120) &&
+        (!('photoURL' in data) || isBoundedString(data.photoURL, 500)) &&
+        isValidId(data.organizationId) &&
+        data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor'] &&
+        data.crmAccess is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOrganization(data) {
+      return data.keys().hasAll(['id', 'name', 'slug', 'ownerId', 'primaryColor', 'secondaryColor', 'duplicateMatchMode', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'slug', 'ownerId', 'primaryColor', 'secondaryColor', 'duplicateMatchMode', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.name, 140) &&
+        isValidSlug(data.slug) &&
+        isValidId(data.ownerId) &&
+        isBoundedString(data.primaryColor, 20) &&
+        isBoundedString(data.secondaryColor, 20) &&
+        data.duplicateMatchMode in ['email_or_phone', 'email_only', 'phone_only', 'email_and_phone'] &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOrgMember(data) {
+      return data.keys().hasAll(['userId', 'organizationId', 'email', 'displayName', 'role', 'crmAccess', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'organizationId', 'email', 'displayName', 'role', 'crmAccess', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.userId) &&
+        isValidId(data.organizationId) &&
+        isBoundedString(data.email, 200) &&
+        isBoundedString(data.displayName, 120) &&
+        data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor'] &&
+        data.crmAccess is bool &&
+        isBoundedStringList(data.assignedBusinessUnitIds, 50) &&
+        data.status in ['active', 'inactive', 'invited'] &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBusinessUnit(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'name', 'slug', 'description', 'category', 'services', 'logoUrl', 'brandColor', 'contactEmail', 'phoneNumber', 'physicalAddress', 'website', 'assignedAdminIds', 'assignedStaffIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'name', 'slug', 'description', 'category', 'services', 'logoUrl', 'brandColor', 'contactEmail', 'phoneNumber', 'physicalAddress', 'website', 'assignedAdminIds', 'assignedStaffIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isNonEmptyString(data.name, 140) &&
+        isValidSlug(data.slug) &&
+        isBoundedString(data.description, 1500) &&
+        isBoundedString(data.category, 100) &&
+        isBoundedStringList(data.services, 40) &&
+        isBoundedString(data.logoUrl, 250000) &&
+        isBoundedString(data.brandColor, 20) &&
+        isBoundedString(data.contactEmail, 200) &&
+        isBoundedString(data.phoneNumber, 50) &&
+        isBoundedString(data.physicalAddress, 300) &&
+        isBoundedString(data.website, 300) &&
+        isBoundedStringList(data.assignedAdminIds, 30) &&
+        isBoundedStringList(data.assignedStaffIds, 60) &&
+        data.status in ['active', 'inactive'] &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDynamicForm(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'businessUnitId', 'businessUnitSlug', 'businessUnitName', 'title', 'slug', 'publicSlugKey', 'description', 'fields', 'isPublished', 'isActive', 'submissionLimit', 'submissionCount', 'confirmationMessage', 'brandColor', 'logoUrl', 'aiPrompt', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'businessUnitId', 'businessUnitSlug', 'businessUnitName', 'title', 'slug', 'publicSlugKey', 'description', 'fields', 'isPublished', 'isActive', 'submissionLimit', 'submissionCount', 'confirmationMessage', 'brandColor', 'logoUrl', 'aiPrompt', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.businessUnitId) &&
+        isValidSlug(data.businessUnitSlug) &&
+        isNonEmptyString(data.businessUnitName, 140) &&
+        isNonEmptyString(data.title, 180) &&
+        isValidSlug(data.slug) &&
+        isValidPublicKey(data.publicSlugKey) &&
+        isBoundedString(data.description, 1500) &&
+        data.fields is list && data.fields.size() <= 80 &&
+        data.isPublished is bool &&
+        data.isActive is bool &&
+        data.submissionLimit is number && data.submissionLimit >= 0 && data.submissionLimit <= 1000000 &&
+        data.submissionCount is number && data.submissionCount >= 0 && data.submissionCount <= 10000000 &&
+        isBoundedString(data.confirmationMessage, 1000) &&
+        isBoundedString(data.brandColor, 20) &&
+        isBoundedString(data.logoUrl, 250000) &&
+        isBoundedString(data.aiPrompt, 2000) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublicFormProjection(data) {
+      return data.keys().hasAll(['publicSlugKey', 'organizationId', 'businessUnitId', 'businessUnitSlug', 'businessUnitName', 'formId', 'formSlug', 'title', 'description', 'fields', 'isPublished', 'isActive', 'submissionLimit', 'confirmationMessage', 'brandColor', 'logoUrl', 'orgOwnerId', 'updatedAt']) &&
+        data.keys().hasOnly(['publicSlugKey', 'organizationId', 'businessUnitId', 'businessUnitSlug', 'businessUnitName', 'formId', 'formSlug', 'title', 'description', 'fields', 'isPublished', 'isActive', 'submissionLimit', 'confirmationMessage', 'brandColor', 'logoUrl', 'orgOwnerId', 'updatedAt']) &&
+        isValidPublicKey(data.publicSlugKey) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.businessUnitId) &&
+        isValidSlug(data.businessUnitSlug) &&
+        isNonEmptyString(data.businessUnitName, 140) &&
+        isValidId(data.formId) &&
+        isValidSlug(data.formSlug) &&
+        isNonEmptyString(data.title, 180) &&
+        isBoundedString(data.description, 1500) &&
+        data.fields is list && data.fields.size() <= 80 &&
+        data.isPublished is bool &&
+        data.isActive is bool &&
+        data.submissionLimit is number && data.submissionLimit >= 0 &&
+        isBoundedString(data.confirmationMessage, 1000) &&
+        isBoundedString(data.brandColor, 20) &&
+        isBoundedString(data.logoUrl, 250000) &&
+        isValidId(data.orgOwnerId) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFormSubmission(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'businessUnitId', 'businessUnitName', 'formId', 'formTitle', 'publicSlugKey', 'leadId', 'leadRef', 'responses', 'submitterName', 'submitterEmail', 'submitterPhone', 'source', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'businessUnitId', 'businessUnitName', 'formId', 'formTitle', 'publicSlugKey', 'leadId', 'leadRef', 'responses', 'submitterName', 'submitterEmail', 'submitterPhone', 'source', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.businessUnitId) &&
+        isNonEmptyString(data.businessUnitName, 140) &&
+        isValidId(data.formId) &&
+        isNonEmptyString(data.formTitle, 180) &&
+        isValidPublicKey(data.publicSlugKey) &&
+        isValidId(data.leadId) &&
+        isNonEmptyString(data.leadRef, 40) &&
+        data.responses is map &&
+        isBoundedString(data.submitterName, 160) &&
+        isBoundedString(data.submitterEmail, 200) &&
+        isBoundedString(data.submitterPhone, 60) &&
+        data.source in ['public_form', 'manual_entry', 'portal_preview'] &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidLead(data) {
+      return data.keys().hasAll(['id', 'leadRef', 'organizationId', 'businessUnitId', 'businessUnitName', 'formId', 'formTitle', 'submissionId', 'publicSlugKey', 'fullName', 'email', 'phone', 'responses', 'source', 'assignedStaffId', 'assignedStaffName', 'status', 'priority', 'followUpDate', 'lastContactAt', 'internalNotes', 'attachments', 'ownerId', 'authorizedUserIds', 'submittedAt', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'leadRef', 'organizationId', 'businessUnitId', 'businessUnitName', 'formId', 'formTitle', 'submissionId', 'publicSlugKey', 'fullName', 'email', 'phone', 'responses', 'source', 'assignedStaffId', 'assignedStaffName', 'status', 'priority', 'followUpDate', 'lastContactAt', 'internalNotes', 'attachments', 'ownerId', 'authorizedUserIds', 'submittedAt', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.leadRef, 40) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.businessUnitId) &&
+        isNonEmptyString(data.businessUnitName, 140) &&
+        isBoundedString(data.formId, 128) &&
+        isBoundedString(data.formTitle, 180) &&
+        isBoundedString(data.submissionId, 128) &&
+        isBoundedString(data.publicSlugKey, 180) &&
+        isBoundedString(data.fullName, 160) &&
+        isBoundedString(data.email, 200) &&
+        isBoundedString(data.phone, 60) &&
+        data.responses is map &&
+        isBoundedString(data.source, 80) &&
+        isBoundedString(data.assignedStaffId, 128) &&
+        isBoundedString(data.assignedStaffName, 120) &&
+        data.status in ['new', 'contacted', 'interested', 'converted', 'lost', 'archived'] &&
+        data.priority in ['low', 'medium', 'high', 'urgent'] &&
+        isBoundedString(data.followUpDate, 40) &&
+        isBoundedString(data.lastContactAt, 40) &&
+        isBoundedString(data.internalNotes, 5000) &&
+        data.attachments is list && data.attachments.size() <= 20 &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.submittedAt is timestamp &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLeadActivity(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'leadId', 'type', 'summary', 'details', 'actorId', 'actorName', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'leadId', 'type', 'summary', 'details', 'actorId', 'actorName', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.leadId) &&
+        data.type in ['submission', 'status_change', 'assignment', 'note', 'call', 'meeting', 'followup', 'communication', 'archive', 'restore', 'edit'] &&
+        isNonEmptyString(data.summary, 500) &&
+        isBoundedString(data.details, 2000) &&
+        isBoundedString(data.actorId, 128) &&
+        isBoundedString(data.actorName, 120) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCommunication(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'businessUnitId', 'leadId', 'leadName', 'channel', 'recipient', 'subject', 'body', 'deliveryStatus', 'provider', 'senderId', 'senderName', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'businessUnitId', 'leadId', 'leadName', 'channel', 'recipient', 'subject', 'body', 'deliveryStatus', 'provider', 'senderId', 'senderName', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isBoundedString(data.businessUnitId, 128) &&
+        isValidId(data.leadId) &&
+        isBoundedString(data.leadName, 160) &&
+        data.channel in ['email', 'sms'] &&
+        isNonEmptyString(data.recipient, 200) &&
+        isBoundedString(data.subject, 250) &&
+        isNonEmptyString(data.body, 5000) &&
+        data.deliveryStatus in ['sent', 'queued_pending_provider_approval', 'failed'] &&
+        isBoundedString(data.provider, 60) &&
+        isValidId(data.senderId) &&
+        isBoundedString(data.senderName, 120) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidMessageTemplate(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'businessUnitId', 'name', 'channel', 'subject', 'body', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'businessUnitId', 'name', 'channel', 'subject', 'body', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isBoundedString(data.businessUnitId, 128) &&
+        isNonEmptyString(data.name, 140) &&
+        data.channel in ['email', 'sms'] &&
+        isBoundedString(data.subject, 250) &&
+        isNonEmptyString(data.body, 5000) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStaffAssignment(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'businessUnitId', 'userId', 'role', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'businessUnitId', 'userId', 'role', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.businessUnitId) &&
+        isValidId(data.userId) &&
+        data.role in ['bu_manager', 'staff'] &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'recipientUserId', 'title', 'message', 'entityType', 'entityId', 'isRead', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'recipientUserId', 'title', 'message', 'entityType', 'entityId', 'isRead', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.recipientUserId) &&
+        isNonEmptyString(data.title, 180) &&
+        isNonEmptyString(data.message, 500) &&
+        data.entityType in ['lead', 'form', 'followup', 'integration'] &&
+        isBoundedString(data.entityId, 128) &&
+        data.isRead is bool &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'actorId', 'actorName', 'action', 'resourceType', 'resourceId', 'summary', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'actorId', 'actorName', 'action', 'resourceType', 'resourceId', 'summary', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.actorId) &&
+        isBoundedString(data.actorName, 120) &&
+        isNonEmptyString(data.action, 100) &&
+        isNonEmptyString(data.resourceType, 80) &&
+        isBoundedString(data.resourceId, 128) &&
+        isNonEmptyString(data.summary, 500) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidIntegrationConfig(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'providerKey', 'displayName', 'purpose', 'requiredCredentials', 'estimatedCost', 'approvalStatus', 'approvedBy', 'ownerId', 'authorizedUserIds', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'providerKey', 'displayName', 'purpose', 'requiredCredentials', 'estimatedCost', 'approvalStatus', 'approvedBy', 'ownerId', 'authorizedUserIds', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        data.providerKey in ['gemini_ai', 'resend_email', 'twilio_sms', 'whatsapp_cloud'] &&
+        isNonEmptyString(data.displayName, 120) &&
+        isNonEmptyString(data.purpose, 500) &&
+        isBoundedStringList(data.requiredCredentials, 10) &&
+        isBoundedString(data.estimatedCost, 300) &&
+        data.approvalStatus in ['enabled', 'pending_approval', 'approved_awaiting_env', 'disabled'] &&
+        isBoundedString(data.approvedBy, 128) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // PUBLIC FORM HELPER (VALIDATES ACTIVE PUBLISHED FORM FOR PUBLIC WRITES)
+    // =========================================================================
+
+    function isActivePublicForm(slugKey, orgId, buId, formId) {
+      return isValidPublicKey(slugKey) &&
+        exists(/databases/$(database)/documents/publicForms/$(slugKey)) &&
+        get(/databases/$(database)/documents/publicForms/$(slugKey)).data.isPublished == true &&
+        get(/databases/$(database)/documents/publicForms/$(slugKey)).data.isActive == true &&
+        get(/databases/$(database)/documents/publicForms/$(slugKey)).data.organizationId == orgId &&
+        get(/databases/$(database)/documents/publicForms/$(slugKey)).data.businessUnitId == buId &&
+        get(/databases/$(database)/documents/publicForms/$(slugKey)).data.formId == formId;
+    }
+
+    // =========================================================================
+    // USERS COLLECTION (PII ISOLATED TO OWNER OR BOOTSTRAP SUPER ADMIN)
+    // =========================================================================
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && (
+        request.auth.uid == userId || isBootstrapSuperAdmin()
+      );
+      allow list: if isBootstrapSuperAdmin();
+      allow create: if isValidId(userId) && isVerifiedUser() &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isBootstrapSuperAdmin() || (
+            request.auth.uid == userId &&
+            incoming().role == 'staff' &&
+            incoming().crmAccess == false
+          )
+        );
+      allow update: if isValidId(userId) && isVerifiedUser() &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          (isBootstrapSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'organizationId', 'role', 'crmAccess', 'updatedAt'])) ||
+          (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']))
+        );
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // PUBLIC FORMS PROJECTION (SANITIZED PUBLIC GET ONLY — NO LISTING)
+    // =========================================================================
+
+    match /publicForms/{publicSlugKey} {
+      allow get: if isValidPublicKey(publicSlugKey) && (
+        (existing().isPublished == true && existing().isActive == true) ||
+        isBootstrapSuperAdmin() ||
+        (isVerifiedUser() && existing().orgOwnerId == request.auth.uid)
+      );
+      allow list: if false;
+      allow create: if isValidPublicKey(publicSlugKey) && isVerifiedUser() &&
+        isValidPublicFormProjection(incoming()) &&
+        incoming().publicSlugKey == publicSlugKey &&
+        incoming().updatedAt == request.time && (
+          isOrgSuperOrAdmin(incoming().organizationId) ||
+          isBuManagerFor(incoming().organizationId, incoming().businessUnitId)
+        );
+      allow update: if isValidPublicKey(publicSlugKey) && isVerifiedUser() &&
+        isValidPublicFormProjection(incoming()) &&
+        incoming().publicSlugKey == existing().publicSlugKey &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['businessUnitName', 'title', 'description', 'fields', 'isPublished', 'isActive', 'submissionLimit', 'confirmationMessage', 'brandColor', 'logoUrl', 'updatedAt']) && (
+          isOrgSuperOrAdmin(existing().organizationId) ||
+          isBuManagerFor(existing().organizationId, existing().businessUnitId)
+        );
+      allow delete: if isValidPublicKey(publicSlugKey) && isVerifiedUser() && (
+        isOrgSuperOrAdmin(existing().organizationId) ||
+        isBuManagerFor(existing().organizationId, existing().businessUnitId)
+      );
+    }
+
+    // =========================================================================
+    // ORGANIZATIONS & MULTI-TENANT SUBCOLLECTIONS
+    // =========================================================================
+
+    match /organizations/{organizationId} {
+      allow get: if isValidId(organizationId) && canReadOrgRecord(existing());
+      allow list: if isSignedIn() && canReadOrgRecord(existing());
+      allow create: if isValidId(organizationId) && isVerifiedUser() &&
+        isValidOrganization(incoming()) &&
+        incoming().id == organizationId &&
+        incoming().ownerId == request.auth.uid &&
+        request.auth.uid in incoming().authorizedUserIds &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(organizationId) && isVerifiedUser() &&
+        isValidOrganization(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(organizationId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'primaryColor', 'secondaryColor', 'duplicateMatchMode', 'authorizedUserIds', 'updatedAt']);
+      allow delete: if false;
+
+      // -----------------------------------------------------------------------
+      // ORGANIZATION MEMBERS (RBAC)
+      // -----------------------------------------------------------------------
+      match /members/{userId} {
+        allow get: if isValidId(organizationId) && isValidId(userId) && isSignedIn() && (
+          request.auth.uid == userId || canReadOrgRecord(existing())
+        );
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(userId) && isVerifiedUser() &&
+          isValidOrgMember(incoming()) &&
+          incoming().organizationId == organizationId &&
+          incoming().userId == userId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/organizations/$(organizationId)) && (
+            isOrgSuperOrAdmin(organizationId) || (
+              request.auth.uid == userId &&
+              incoming().role == 'super_admin' &&
+              getAfter(/databases/$(database)/documents/organizations/$(organizationId)).data.ownerId == request.auth.uid
+            )
+          );
+        allow update: if isValidId(organizationId) && isValidId(userId) && isVerifiedUser() &&
+          isValidOrgMember(incoming()) &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().userId == existing().userId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isOrgSuperOrAdmin(organizationId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'role', 'crmAccess', 'assignedBusinessUnitIds', 'status', 'authorizedUserIds', 'updatedAt']);
+        allow delete: if isValidId(organizationId) && isValidId(userId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId) &&
+          userId != request.auth.uid;
+      }
+
+      // -----------------------------------------------------------------------
+      // BUSINESS UNITS
+      // -----------------------------------------------------------------------
+      match /businessUnits/{businessUnitId} {
+        allow get: if isValidId(organizationId) && isValidId(businessUnitId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(businessUnitId) && isVerifiedUser() &&
+          isValidBusinessUnit(incoming()) &&
+          incoming().id == businessUnitId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/organizations/$(organizationId)) &&
+          isOrgSuperOrAdmin(organizationId);
+        allow update: if isValidId(organizationId) && isValidId(businessUnitId) && isVerifiedUser() &&
+          isValidBusinessUnit(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            (isOrgSuperOrAdmin(organizationId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'slug', 'description', 'category', 'services', 'logoUrl', 'brandColor', 'contactEmail', 'phoneNumber', 'physicalAddress', 'website', 'assignedAdminIds', 'assignedStaffIds', 'status', 'authorizedUserIds', 'updatedAt'])) ||
+            (isBuManagerFor(organizationId, businessUnitId) && incoming().diff(existing()).affectedKeys().hasOnly(['description', 'services', 'logoUrl', 'brandColor', 'contactEmail', 'phoneNumber', 'physicalAddress', 'website', 'assignedStaffIds', 'updatedAt']))
+          );
+        allow delete: if isValidId(organizationId) && isValidId(businessUnitId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
+
+        // ---------------------------------------------------------------------
+        // DYNAMIC FORMS UNDER BUSINESS UNIT
+        // ---------------------------------------------------------------------
+        match /forms/{formId} {
+          allow get: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && canReadOrgRecord(existing());
+          allow list: if isSignedIn() && canReadOrgRecord(existing());
+          allow create: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isVerifiedUser() &&
+            isValidDynamicForm(incoming()) &&
+            incoming().id == formId &&
+            incoming().organizationId == organizationId &&
+            incoming().businessUnitId == businessUnitId &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time &&
+            exists(/databases/$(database)/documents/organizations/$(organizationId)/businessUnits/$(businessUnitId)) && (
+              isOrgSuperOrAdmin(organizationId) ||
+              isBuManagerFor(organizationId, businessUnitId)
+            );
+          allow update: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isVerifiedUser() &&
+            isValidDynamicForm(incoming()) &&
+            incoming().id == existing().id &&
+            incoming().organizationId == existing().organizationId &&
+            incoming().businessUnitId == existing().businessUnitId &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time && (
+              isOrgSuperOrAdmin(organizationId) ||
+              isBuManagerFor(organizationId, businessUnitId)
+            ) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'slug', 'publicSlugKey', 'businessUnitName', 'description', 'fields', 'isPublished', 'isActive', 'submissionLimit', 'submissionCount', 'confirmationMessage', 'brandColor', 'logoUrl', 'aiPrompt', 'authorizedUserIds', 'updatedAt']);
+          allow delete: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isVerifiedUser() && (
+            isOrgSuperOrAdmin(organizationId) ||
+            isBuManagerFor(organizationId, businessUnitId)
+          );
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // FORM SUBMISSIONS (PUBLIC CREATE VALIDATED AGAINST ACTIVE PUBLIC FORM)
+      // -----------------------------------------------------------------------
+      match /formSubmissions/{submissionId} {
+        allow get: if isValidId(organizationId) && isValidId(submissionId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(submissionId) &&
+          isValidFormSubmission(incoming()) &&
+          incoming().id == submissionId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time && (
+            (
+              incoming().source == 'public_form' &&
+              isActivePublicForm(incoming().publicSlugKey, organizationId, incoming().businessUnitId, incoming().formId) &&
+              incoming().ownerId == get(/databases/$(database)/documents/publicForms/$(incoming().publicSlugKey)).data.orgOwnerId &&
+              incoming().authorizedUserIds.size() == 1 &&
+              incoming().authorizedUserIds[0] == incoming().ownerId
+            ) || (
+              isVerifiedUser() && isStaffForOrg(organizationId)
+            )
+          );
+        allow update: if false;
+        allow delete: if isValidId(organizationId) && isValidId(submissionId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
+      }
+
+      // -----------------------------------------------------------------------
+      // CENTRALIZED CRM LEADS (ATOMIC PUBLIC CREATE + TIERED RBAC UPDATES)
+      // -----------------------------------------------------------------------
+      match /leads/{leadId} {
+        allow get: if isValidId(organizationId) && isValidId(leadId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(leadId) &&
+          isValidLead(incoming()) &&
+          incoming().id == leadId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          incoming().submittedAt == request.time && (
+            (
+              incoming().source == 'public_form' &&
+              incoming().status == 'new' &&
+              incoming().priority == 'medium' &&
+              incoming().assignedStaffId == '' &&
+              incoming().assignedStaffName == '' &&
+              isActivePublicForm(incoming().publicSlugKey, organizationId, incoming().businessUnitId, incoming().formId) &&
+              incoming().ownerId == get(/databases/$(database)/documents/publicForms/$(incoming().publicSlugKey)).data.orgOwnerId &&
+              incoming().authorizedUserIds.size() == 1 &&
+              incoming().authorizedUserIds[0] == incoming().ownerId &&
+              existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/formSubmissions/$(incoming().submissionId))
+            ) || (
+              isVerifiedUser() && isStaffForOrg(organizationId)
+            )
+          );
+        allow update: if isValidId(organizationId) && isValidId(leadId) && isVerifiedUser() &&
+          isValidLead(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().leadRef == existing().leadRef &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().submittedAt == existing().submittedAt &&
+          incoming().updatedAt == request.time && (
+            // Tier 1: Super Admin / Org Admin / BU Manager full operational edit & assignment
+            (
+              (isOrgSuperOrAdmin(organizationId) || isBuManagerFor(organizationId, existing().businessUnitId)) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'email', 'phone', 'status', 'priority', 'assignedStaffId', 'assignedStaffName', 'followUpDate', 'lastContactAt', 'internalNotes', 'attachments', 'authorizedUserIds', 'updatedAt'])
+            ) ||
+            // Tier 2: Assigned Staff operational status/follow-up/notes updates (locked if archived unless admin)
+            (
+              isStaffForOrg(organizationId) &&
+              existing().status != 'archived' &&
+              (existing().assignedStaffId == request.auth.uid || request.auth.uid in existing().authorizedUserIds) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'priority', 'followUpDate', 'lastContactAt', 'internalNotes', 'attachments', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(organizationId) && isValidId(leadId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
+
+        // ---------------------------------------------------------------------
+        // LEAD ACTIVITIES (APPEND-ONLY TIMELINE)
+        // ---------------------------------------------------------------------
+        match /activities/{activityId} {
+          allow get: if isValidId(organizationId) && isValidId(leadId) && isValidId(activityId) && canReadOrgRecord(existing());
+          allow list: if isSignedIn() && canReadOrgRecord(existing());
+          allow create: if isValidId(organizationId) && isValidId(leadId) && isValidId(activityId) &&
+            isValidLeadActivity(incoming()) &&
+            incoming().id == activityId &&
+            incoming().organizationId == organizationId &&
+            incoming().leadId == leadId &&
+            incoming().createdAt == request.time && (
+              (
+                incoming().type == 'submission' &&
+                incoming().actorId == 'public_visitor' &&
+                !exists(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId)) &&
+                existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId))
+              ) || (
+                isVerifiedUser() &&
+                isStaffForOrg(organizationId) &&
+                incoming().actorId == request.auth.uid &&
+                existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId))
+              )
+            );
+          allow update, delete: if false;
+        }
+
+        // ---------------------------------------------------------------------
+        // LEAD COMMUNICATIONS HISTORY (APPEND-ONLY)
+        // ---------------------------------------------------------------------
+        match /communications/{communicationId} {
+          allow get: if isValidId(organizationId) && isValidId(leadId) && isValidId(communicationId) && canReadOrgRecord(existing());
+          allow list: if isSignedIn() && canReadOrgRecord(existing());
+          allow create: if isValidId(organizationId) && isValidId(leadId) && isValidId(communicationId) && isVerifiedUser() &&
+            isValidCommunication(incoming()) &&
+            incoming().id == communicationId &&
+            incoming().organizationId == organizationId &&
+            incoming().leadId == leadId &&
+            incoming().senderId == request.auth.uid &&
+            incoming().createdAt == request.time &&
+            isStaffForOrg(organizationId) &&
+            exists(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId));
+          allow update, delete: if false;
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // MESSAGE TEMPLATES
+      // -----------------------------------------------------------------------
+      match /messageTemplates/{templateId} {
+        allow get: if isValidId(organizationId) && isValidId(templateId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(templateId) && isVerifiedUser() &&
+          isValidMessageTemplate(incoming()) &&
+          incoming().id == templateId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isStaffForOrg(organizationId);
+        allow update: if isValidId(organizationId) && isValidId(templateId) && isVerifiedUser() &&
+          isValidMessageTemplate(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isStaffForOrg(organizationId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['businessUnitId', 'name', 'channel', 'subject', 'body', 'authorizedUserIds', 'updatedAt']);
+        allow delete: if isValidId(organizationId) && isValidId(templateId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
+      }
+
+      // -----------------------------------------------------------------------
+      // STAFF ASSIGNMENTS
+      // -----------------------------------------------------------------------
+      match /staffAssignments/{assignmentId} {
+        allow get: if isValidId(organizationId) && isValidId(assignmentId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(assignmentId) && isVerifiedUser() &&
+          isValidStaffAssignment(incoming()) &&
+          incoming().id == assignmentId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time &&
+          exists(/databases/$(database)/documents/organizations/$(organizationId)/businessUnits/$(incoming().businessUnitId)) &&
+          isOrgSuperOrAdmin(organizationId);
+        allow update: if false;
+        allow delete: if isValidId(organizationId) && isValidId(assignmentId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
+      }
+
+      // -----------------------------------------------------------------------
+      // NOTIFICATIONS
+      // -----------------------------------------------------------------------
+      match /notifications/{notificationId} {
+        allow get: if isValidId(organizationId) && isValidId(notificationId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(notificationId) &&
+          isValidNotification(incoming()) &&
+          incoming().id == notificationId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time && (
+            (
+              incoming().entityType == 'lead' &&
+              !exists(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(incoming().entityId)) &&
+              existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(incoming().entityId))
+            ) || (
+              isVerifiedUser() && isStaffForOrg(organizationId)
+            )
+          );
+        allow update: if isValidId(organizationId) && isValidId(notificationId) && isVerifiedUser() &&
+          isValidNotification(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          (existing().recipientUserId == request.auth.uid || isOrgSuperOrAdmin(organizationId)) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
+        allow delete: if isValidId(organizationId) && isValidId(notificationId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
+      }
+
+      // -----------------------------------------------------------------------
+      // AUDIT LOGS (IMMUTABLE APPEND-ONLY)
+      // -----------------------------------------------------------------------
+      match /auditLogs/{logId} {
+        allow get: if isValidId(organizationId) && isValidId(logId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(logId) && isVerifiedUser() &&
+          isValidAuditLog(incoming()) &&
+          incoming().id == logId &&
+          incoming().organizationId == organizationId &&
+          incoming().actorId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          isStaffForOrg(organizationId);
+        allow update, delete: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // INTEGRATIONS GOVERNANCE (SUPER ADMIN APPROVAL ONLY — NO SECRETS STORED)
+      // -----------------------------------------------------------------------
+      match /integrations/{integrationId} {
+        allow get: if isValidId(organizationId) && isValidId(integrationId) && canReadOrgRecord(existing());
+        allow list: if isSignedIn() && canReadOrgRecord(existing());
+        allow create: if isValidId(organizationId) && isValidId(integrationId) && isVerifiedUser() &&
+          isValidIntegrationConfig(incoming()) &&
+          incoming().id == integrationId &&
+          incoming().organizationId == organizationId &&
+          incoming().updatedAt == request.time &&
+          isOrgSuperOrAdmin(organizationId);
+        allow update: if isValidId(organizationId) && isValidId(integrationId) && isVerifiedUser() &&
+          isValidIntegrationConfig(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().providerKey == existing().providerKey &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().updatedAt == request.time &&
+          isOrgSuperOrAdmin(organizationId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['approvalStatus', 'approvedBy', 'estimatedCost', 'purpose', 'authorizedUserIds', 'updatedAt']);
+        allow delete: if false;
+      }
+    }
+  }
+}

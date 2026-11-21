@@ -1,0 +1,6 @@
+{
+  "name": "Zacma SaaS Portal",
+  "description": "Enterprise Multi-Business Unit Management, AI-Powered Form Generator, Public Lead Extraction, and Centralized CRM Platform for Zacma Technology.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
