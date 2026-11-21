@@ -145,6 +145,13 @@ async function startServer() {
       res.status(401).json({ error: 'Authentication required.' });
       return;
     }
+    const twilioReady = Boolean(
+      process.env.TWILIO_ACCOUNT_SID &&
+        process.env.TWILIO_AUTH_TOKEN &&
+        process.env.TWILIO_FROM_NUMBER
+    );
+    const afroReady = Boolean(process.env.AFROMESSAGE_API_TOKEN);
+
     res.json({
       gemini_ai: {
         configured: Boolean(process.env.GEMINI_API_KEY),
@@ -154,11 +161,8 @@ async function startServer() {
         configured: Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL),
       },
       twilio_sms: {
-        configured: Boolean(
-          process.env.TWILIO_ACCOUNT_SID &&
-            process.env.TWILIO_AUTH_TOKEN &&
-            process.env.TWILIO_FROM_NUMBER
-        ),
+        configured: twilioReady || afroReady,
+        provider: twilioReady ? 'twilio_sms' : afroReady ? 'afromessage_sms' : 'unconfigured',
       },
       whatsapp_cloud: {
         configured: Boolean(
@@ -462,8 +466,295 @@ ${message}`;
   });
 
   // ===========================================================================
-  // PHASE 6: COMMUNICATION DISPATCH WITH API APPROVAL RULE GOVERNANCE
+  // SECTION 8: ZACMA AI CUSTOMER SUPPORT & STUDENT ASSISTANT (24/7 Multilingual)
   // ===========================================================================
+  app.post('/api/ai/support-chat', async (req, res) => {
+    const ip = req.ip || 'unknown';
+    if (!checkRateLimit(`ai-support:${ip}`, 40, 60_000)) {
+      res.status(429).json({ error: 'Too many messages sent. Please wait a minute before trying again.' });
+      return;
+    }
+
+    const message = sanitizeText(req.body?.message, 2000);
+    if (!message) {
+      res.status(400).json({ error: 'Message is required.' });
+      return;
+    }
+
+    // Verify optional Firebase ID token — private student records are ONLY used if verified
+    const verifiedUser = await verifyFirebaseBearer(req);
+    const preferredLanguage = req.body?.preferredLanguage === 'am' ? 'Amharic (አማርኛ)' : 'Auto-detect (English or Amharic)';
+    const customInstructions = sanitizeText(req.body?.aiInstructions, 2500);
+    const registrationFormUrl = sanitizeText(req.body?.registrationFormUrl, 500);
+
+    const courses = Array.isArray(req.body?.courses) ? req.body.courses.slice(0, 40) : [];
+    const faqs = Array.isArray(req.body?.faqs) ? req.body.faqs.slice(0, 50) : [];
+    const currentDraft =
+      req.body?.registrationDraft && typeof req.body.registrationDraft === 'object'
+        ? req.body.registrationDraft
+        : {};
+    const history: Array<{ role: string; text: string }> = Array.isArray(req.body?.history)
+      ? req.body.history.slice(-10).map((m: Record<string, unknown>) => ({
+          role: m.role === 'assistant' || m.role === 'agent' ? 'assistant' : 'user',
+          text: sanitizeText(m.text, 1000),
+        }))
+      : [];
+
+    // Only accept student account records when the caller holds a verified Firebase session
+    const verifiedStudentRecords =
+      verifiedUser && Array.isArray(req.body?.studentRegistrations)
+        ? req.body.studentRegistrations
+            .filter(
+              (r: Record<string, unknown>) =>
+                r && typeof r === 'object' && r.studentUid === verifiedUser.uid
+            )
+            .slice(0, 10)
+        : [];
+
+    try {
+      const ai = getGeminiClient();
+      const systemInstruction = `You are ZACMA AI ASSISTANT, the 24/7 virtual admission officer, student support representative, and training consultant for Zacma Technology Training Institute.
+
+LANGUAGE POLICY:
+- Preferred language setting: ${preferredLanguage}.
+- If the user writes in Amharic (አማርኛ) or requests Amharic, respond naturally, politely, and accurately in Amharic. Otherwise respond in clear, friendly, professional English.
+
+STRICT FACTUAL GROUNDING (NON-NEGOTIABLE):
+- Answer course and institute questions ONLY using the ADMINISTRATOR-APPROVED COURSE CATALOG and SUPPORT KNOWLEDGE BASE provided below.
+- NEVER invent, guess, or estimate course fees, durations, start dates, training batches, or certificates. If a requested detail (such as fee or next batch date) is empty or not present in the catalog/FAQs, transparently state that the administrator has not published that detail yet, offer to connect them with an admission officer, and record their exact question in "unansweredQuestion".
+
+CONVERSATIONAL REGISTRATION FLOW:
+- When a prospective student wants to register for a course, guide them warmly step by step (1-2 questions at a time) through:
+  1. Full name
+  2. Phone number
+  3. Address (city/area)
+  4. Preferred course
+  5. Training delivery method (Online, In-Person, or Weekend)
+  6. Preferred schedule (e.g., Morning, Afternoon, Evening, Weekend)
+  7. Preferred payment method
+  8. Document uploads — NEVER ask for or accept ID cards, passport photos, or private files directly inside chat! Instead, set "suggestRegistrationFormLink": true and explain they can securely upload documents through the official registration form link (${registrationFormUrl || 'provided after confirmation'}).
+- Keep updating "registrationDraft" with every field collected or corrected so far.
+- Once fullName, phone, address, preferredCourse, deliveryMethod, preferredSchedule, and paymentMethod are all collected and validated, summarize the details clearly, ask for explicit confirmation, and set "readyForConfirmation": true.
+
+STUDENT SUPPORT PRIVACY:
+- Caller authenticated: ${verifiedUser ? `YES (verified email: ${verifiedUser.email})` : 'NO (unauthenticated visitor)'}.
+- If an unauthenticated visitor asks for private account details (personal registration status, personal payment balance, or personal certificate issuance), politely explain they must sign in to their Zacma account first to view private records, and NEVER expose or speculate about anyone's private data.
+- If authenticated, answer ONLY from VERIFIED STUDENT RECORDS below.
+
+HUMAN ESCALATION & LEAD CAPTURE:
+- If the visitor asks to speak with a human agent, reports an urgent billing/complaint issue, or needs assistance outside the knowledge base, set "needsHumanEscalation": true.
+- If a prospective student expresses interest in a course and provides a phone number or email (without finishing full registration yet), set "captureLeadSuggested": true so they can consent to admission follow-up.
+
+ADMINISTRATOR CUSTOM INSTRUCTIONS:
+${customInstructions || 'Be warm, structured, concise, and helpful.'}`;
+
+      const contents = `ADMINISTRATOR-APPROVED COURSE CATALOG (Firebase):
+${JSON.stringify(courses).slice(0, 18000)}
+
+SUPPORT KNOWLEDGE BASE & FAQS (Firebase):
+${JSON.stringify(faqs).slice(0, 10000)}
+
+VERIFIED STUDENT RECORDS (only populated for verified signed-in student):
+${JSON.stringify(verifiedStudentRecords).slice(0, 4000)}
+
+CURRENT REGISTRATION DRAFT COLLECTED SO FAR:
+${JSON.stringify(currentDraft)}
+
+CONVERSATION HISTORY:
+${history.map((h) => `${h.role.toUpperCase()}: ${h.text}`).join('\n')}
+
+LATEST VISITOR MESSAGE:
+${message}`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              reply: { type: Type.STRING, description: 'Helpful conversational response in English or Amharic' },
+              detectedLanguage: { type: Type.STRING, description: 'en, am, or other' },
+              intent: {
+                type: Type.STRING,
+                description: 'One of: course_inquiry, registration, student_support, escalation, general',
+              },
+              interestedCourse: { type: Type.STRING, description: 'Matched course title if discussed' },
+              needsHumanEscalation: { type: Type.BOOLEAN },
+              unansweredQuestion: {
+                type: Type.STRING,
+                description: 'Non-empty ONLY if visitor asked a factual question not covered in the catalog or FAQs',
+              },
+              suggestRegistrationFormLink: { type: Type.BOOLEAN },
+              captureLeadSuggested: { type: Type.BOOLEAN },
+              registrationDraft: {
+                type: Type.OBJECT,
+                properties: {
+                  fullName: { type: Type.STRING },
+                  phone: { type: Type.STRING },
+                  email: { type: Type.STRING },
+                  address: { type: Type.STRING },
+                  preferredCourse: { type: Type.STRING },
+                  deliveryMethod: { type: Type.STRING },
+                  preferredSchedule: { type: Type.STRING },
+                  paymentMethod: { type: Type.STRING },
+                  readyForConfirmation: { type: Type.BOOLEAN },
+                },
+              },
+            },
+            required: ['reply', 'detectedLanguage', 'intent', 'needsHumanEscalation'],
+          },
+        },
+      });
+
+      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const validIntents = new Set(['course_inquiry', 'registration', 'student_support', 'escalation', 'general']);
+      const validLangs = new Set(['en', 'am', 'other']);
+
+      res.json({
+        reply: typeof parsed.reply === 'string' && parsed.reply.trim()
+          ? parsed.reply.trim()
+          : 'Thank you for reaching out to Zacma Technology Training Institute. How may I assist you?',
+        detectedLanguage: validLangs.has(parsed.detectedLanguage) ? parsed.detectedLanguage : 'en',
+        intent: validIntents.has(parsed.intent) ? parsed.intent : 'general',
+        interestedCourse: sanitizeText(parsed.interestedCourse, 160),
+        needsHumanEscalation: Boolean(parsed.needsHumanEscalation),
+        unansweredQuestion: sanitizeText(parsed.unansweredQuestion, 400),
+        suggestRegistrationFormLink: Boolean(parsed.suggestRegistrationFormLink),
+        captureLeadSuggested: Boolean(parsed.captureLeadSuggested),
+        registrationDraft:
+          parsed.registrationDraft && typeof parsed.registrationDraft === 'object'
+            ? {
+                fullName: sanitizeText(parsed.registrationDraft.fullName, 160),
+                phone: sanitizeText(parsed.registrationDraft.phone, 60),
+                email: sanitizeText(parsed.registrationDraft.email, 200),
+                address: sanitizeText(parsed.registrationDraft.address, 300),
+                preferredCourse: sanitizeText(parsed.registrationDraft.preferredCourse, 160),
+                deliveryMethod: sanitizeText(parsed.registrationDraft.deliveryMethod, 80),
+                preferredSchedule: sanitizeText(parsed.registrationDraft.preferredSchedule, 120),
+                paymentMethod: sanitizeText(parsed.registrationDraft.paymentMethod, 120),
+                readyForConfirmation: Boolean(parsed.registrationDraft.readyForConfirmation),
+              }
+            : null,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Support assistant failed.';
+      console.error('AI Support Chat Error:', msg);
+      res.status(500).json({ error: `Zacma AI Support error: ${msg}` });
+    }
+  });
+
+  // ===========================================================================
+  // AI SMS & EMAIL MESSAGE WRITER (Bilingual English / Amharic with Merge Tags)
+  // ===========================================================================
+  app.post('/api/ai/compose-message', async (req, res) => {
+    const ip = req.ip || 'unknown';
+    if (!checkRateLimit(`ai-compose:${ip}`, 30, 60_000)) {
+      res.status(429).json({ error: 'Too many AI drafting requests. Please wait a minute.' });
+      return;
+    }
+
+    const verified = await verifyFirebaseBearer(req);
+    if (!verified) {
+      res.status(401).json({ error: 'Authentication required to generate Email/SMS drafts.' });
+      return;
+    }
+
+    const prompt = sanitizeText(req.body?.prompt, 1200);
+    const channel =
+      req.body?.channel === 'sms' || req.body?.channel === 'both' ? req.body.channel : 'email';
+    const language = req.body?.language === 'am' ? 'Amharic (አማርኛ)' : 'English';
+    const tone = sanitizeText(req.body?.tone, 60) || 'Professional and helpful';
+    const businessUnitName =
+      sanitizeText(req.body?.businessUnitName, 140) || 'Zacma Technology Training Institute';
+    const courseName = sanitizeText(req.body?.courseName, 140);
+    const courseFee = sanitizeText(req.body?.courseFee, 80) || '8,500 ETB';
+
+    if (!prompt) {
+      res.status(400).json({ error: 'Please describe the Email or SMS message you want to write.' });
+      return;
+    }
+
+    try {
+      const ai = getGeminiClient();
+      const systemInstruction = `You are the Zacma SaaS Portal Communications Copywriter for ${businessUnitName}.
+Generate ready-to-send personalized Email and/or SMS drafts based strictly on the administrator's prompt.
+
+STRICT RULES:
+1. Language: Write naturally in ${language}.
+2. Tone: ${tone}.
+3. Personalization variables available (use when helpful, keeping exact double curly brace syntax):
+   - {{full_name}}
+   - {{business_name}}
+   - {{lead_ref}}
+   - {{course_name}}
+   - {{course_fee}}
+   - {{form_title}}
+4. If the user asks about course fees and did not specify another amount, standard institute tuition is ${courseFee}. Never invent unauthorized discounts, fake bank account numbers, or unapproved deadlines.
+5. For SMS (smsBody): Keep it clear, polite, and concise (ideally under 160 characters in English or brief in Amharic) with no markdown formatting.
+6. For Email (emailSubject & emailBody): Provide a clear subject line and well-structured plain-text paragraphs with greeting and sign-off from {{business_name}}.`;
+
+      const contents = `CHANNEL TARGET: ${channel.toUpperCase()}
+BUSINESS UNIT: ${businessUnitName}
+${courseName ? `TARGET COURSE: ${courseName}` : ''}
+APPROVED STANDARD FEE: ${courseFee}
+
+STAFF PROMPT:
+${prompt}`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              emailSubject: {
+                type: Type.STRING,
+                description: 'Concise email subject line using merge tags if helpful',
+              },
+              emailBody: {
+                type: Type.STRING,
+                description: 'Complete personalized plain-text email body',
+              },
+              smsBody: {
+                type: Type.STRING,
+                description: 'Concise personalized SMS message body',
+              },
+            },
+            required: ['emailSubject', 'emailBody', 'smsBody'],
+          },
+        },
+      });
+
+      const parsed = JSON.parse((response.text ?? '{}').trim());
+      res.json({
+        emailSubject: sanitizeText(parsed.emailSubject, 250),
+        emailBody: typeof parsed.emailBody === 'string' ? parsed.emailBody.trim().slice(0, 4000) : '',
+        smsBody: typeof parsed.smsBody === 'string' ? parsed.smsBody.trim().slice(0, 600) : '',
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to generate message draft.';
+      console.error('AI Compose Message Error:', msg);
+      res.status(500).json({ error: `AI Message Writer error: ${msg}` });
+    }
+  });
+
+  // ===========================================================================
+  // PHASE 6: COMMUNICATION DISPATCH (RESEND EMAIL + TWILIO / AFROMESSAGE SMS)
+  // ===========================================================================
+  const escapeHtml = (unsafe: string) =>
+    unsafe
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
   app.post('/api/communications/dispatch', async (req, res) => {
     const ip = req.ip || 'unknown';
     if (!checkRateLimit(`comm:${ip}`, 40, 60_000)) {
@@ -480,16 +771,33 @@ ${message}`;
     const channel = req.body?.channel === 'sms' ? 'sms' : 'email';
     const recipient = sanitizeText(req.body?.recipient, 200);
     const subject = sanitizeText(req.body?.subject, 250);
-    const body = sanitizeText(req.body?.body, 5000);
+    const body = typeof req.body?.body === 'string' ? req.body.body.trim().slice(0, 5000) : '';
 
     if (!recipient || !body) {
       res.status(400).json({ error: 'Recipient and message body are required.' });
       return;
     }
 
-    // Check real server-side configured providers; never invent credentials
+    if (channel === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+      res.status(400).json({ error: 'Please provide a valid recipient email address.' });
+      return;
+    }
+
+    const normalizedPhone = recipient.replace(/[^0-9+]/g, '');
+    if (channel === 'sms' && normalizedPhone.length < 7) {
+      res.status(400).json({ error: 'Please provide a valid recipient phone number.' });
+      return;
+    }
+
+    // 1. Live Email Dispatch via Resend (strictly server-side credentials)
     if (channel === 'email' && process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) {
       try {
+        const htmlBody = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #E2E8F0;border-radius:10px;overflow:hidden;">
+          <div style="background:#1D4ED8;color:#FFFFFF;padding:18px 24px;font-weight:700;font-size:16px;">Zacma Technology Portal</div>
+          <div style="padding:24px;color:#0F172A;font-size:14px;line-height:1.65;white-space:pre-line;">${escapeHtml(body)}</div>
+          <div style="background:#F8FAFC;border-top:1px solid #E2E8F0;padding:12px 24px;color:#64748B;font-size:11px;">Sent via Zacma Communication Center</div>
+        </div>`;
+
         const emailResp = await fetch('https://api.resend.com/emails', {
           method: 'POST',
           headers: {
@@ -501,6 +809,7 @@ ${message}`;
             to: [recipient],
             subject: subject || 'Message from Zacma Portal',
             text: body,
+            html: htmlBody,
           }),
         });
         if (emailResp.ok) {
@@ -519,6 +828,7 @@ ${message}`;
       }
     }
 
+    // 2A. Live SMS Dispatch via Twilio (strictly server-side credentials)
     if (
       channel === 'sms' &&
       process.env.TWILIO_ACCOUNT_SID &&
@@ -530,7 +840,7 @@ ${message}`;
           `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
         ).toString('base64');
         const params = new URLSearchParams({
-          To: recipient,
+          To: normalizedPhone,
           From: process.env.TWILIO_FROM_NUMBER,
           Body: body,
         });
@@ -561,14 +871,46 @@ ${message}`;
       }
     }
 
-    // API Approval Rule: External paid provider not yet approved/configured with server env credentials
+    // 2B. Live SMS Dispatch via AfroMessage (optional Ethiopian SMS gateway)
+    if (channel === 'sms' && process.env.AFROMESSAGE_API_TOKEN) {
+      try {
+        const afroResp = await fetch('https://api.afromessage.com/api/send', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.AFROMESSAGE_API_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            to: normalizedPhone,
+            message: body,
+            ...(process.env.AFROMESSAGE_SENDER_ID ? { sender: process.env.AFROMESSAGE_SENDER_ID } : {}),
+            ...(process.env.AFROMESSAGE_IDENTIFIER_ID ? { from: process.env.AFROMESSAGE_IDENTIFIER_ID } : {}),
+          }),
+        });
+        if (afroResp.ok) {
+          res.json({ deliveryStatus: 'sent', provider: 'afromessage_sms' });
+          return;
+        }
+        res.json({
+          deliveryStatus: 'failed',
+          provider: 'afromessage_sms',
+          note: `Provider returned HTTP ${afroResp.status}`,
+        });
+        return;
+      } catch {
+        res.json({ deliveryStatus: 'failed', provider: 'afromessage_sms' });
+        return;
+      }
+    }
+
+    // API Approval Rule: External provider not yet approved/configured with server env credentials
     res.json({
       deliveryStatus: 'queued_pending_provider_approval',
       provider: channel === 'email' ? 'resend_email' : 'twilio_sms',
       note:
         channel === 'email'
           ? 'Logged in CRM Communication History. Configure RESEND_API_KEY & RESEND_FROM_EMAIL after Super Admin approval to dispatch live external emails.'
-          : 'Logged in CRM Communication History. Configure TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN & TWILIO_FROM_NUMBER after Super Admin approval to dispatch live SMS.',
+          : 'Logged in CRM Communication History. Configure TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_FROM_NUMBER or AFROMESSAGE_API_TOKEN after Super Admin approval to dispatch live SMS.',
     });
   });
 

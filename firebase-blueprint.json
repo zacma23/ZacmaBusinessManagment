@@ -334,6 +334,135 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "organizationId", "providerKey", "displayName", "purpose", "requiredCredentials", "estimatedCost", "approvalStatus", "approvedBy", "ownerId", "authorizedUserIds", "updatedAt"]
+    },
+    "PublicSupportConfig": {
+      "title": "PublicSupportConfig",
+      "description": "Publicly readable AI Support Assistant configuration and welcome settings.",
+      "type": "object",
+      "properties": {
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "isActive": { "type": "boolean" },
+        "assistantName": { "type": "string", "maxLength": 100 },
+        "welcomeMessage": { "type": "string", "maxLength": 1000 },
+        "aiInstructions": { "type": "string", "maxLength": 3000 },
+        "supportedLanguages": { "type": "array" },
+        "trainingInstituteBuId": { "type": "string", "maxLength": 128 },
+        "trainingInstituteName": { "type": "string", "maxLength": 160 },
+        "registrationFormUrl": { "type": "string", "maxLength": 500 },
+        "orgOwnerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["organizationId", "isActive", "assistantName", "welcomeMessage", "aiInstructions", "supportedLanguages", "trainingInstituteBuId", "trainingInstituteName", "registrationFormUrl", "orgOwnerId", "updatedAt"]
+    },
+    "TrainingCourse": {
+      "title": "TrainingCourse",
+      "description": "Administrator-approved course catalog item for Zacma Technology Training Institute.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "category": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "learningObjectives": { "type": "array" },
+        "qualifications": { "type": "string", "maxLength": 500 },
+        "duration": { "type": "string", "maxLength": 120 },
+        "deliveryMethods": { "type": "array" },
+        "schedules": { "type": "string", "maxLength": 300 },
+        "availableBatches": { "type": "string", "maxLength": 300 },
+        "certificateInfo": { "type": "string", "maxLength": 400 },
+        "approvedFee": { "type": "string", "maxLength": 120 },
+        "registrationProcedure": { "type": "string", "maxLength": 800 },
+        "isActive": { "type": "boolean" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "title", "category", "description", "learningObjectives", "qualifications", "duration", "deliveryMethods", "schedules", "availableBatches", "certificateInfo", "approvedFee", "registrationProcedure", "isActive", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "SupportKnowledgeItem": {
+      "title": "SupportKnowledgeItem",
+      "description": "Administrator-approved FAQ and student support policy entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "category": { "type": "string", "enum": ["registration", "payment", "schedule", "location", "attendance", "certificates", "materials", "student_services", "general"] },
+        "question": { "type": "string", "minLength": 3, "maxLength": 400 },
+        "answer": { "type": "string", "minLength": 3, "maxLength": 2500 },
+        "language": { "type": "string", "enum": ["en", "am", "both"] },
+        "isActive": { "type": "boolean" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "category", "question", "answer", "language", "isActive", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "SupportConversation": {
+      "title": "SupportConversation",
+      "description": "AI customer support conversation transcript, unanswered questions, and human escalation queue.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128 },
+        "visitorName": { "type": "string", "maxLength": 160 },
+        "visitorPhone": { "type": "string", "maxLength": 60 },
+        "visitorEmail": { "type": "string", "maxLength": 200 },
+        "studentUid": { "type": "string", "maxLength": 128 },
+        "language": { "type": "string", "enum": ["en", "am", "other"] },
+        "intent": { "type": "string", "enum": ["course_inquiry", "registration", "student_support", "escalation", "general"] },
+        "interestedCourse": { "type": "string", "maxLength": 160 },
+        "status": { "type": "string", "enum": ["active", "escalated", "assigned", "resolved"] },
+        "assignedAgentId": { "type": "string", "maxLength": 128 },
+        "assignedAgentName": { "type": "string", "maxLength": 120 },
+        "unansweredQuestions": { "type": "array" },
+        "leadId": { "type": "string", "maxLength": 128 },
+        "leadRef": { "type": "string", "maxLength": 40 },
+        "messages": { "type": "array" },
+        "summary": { "type": "string", "maxLength": 1000 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "businessUnitId", "visitorName", "visitorPhone", "visitorEmail", "studentUid", "language", "intent", "interestedCourse", "status", "assignedAgentId", "assignedAgentName", "unansweredQuestions", "leadId", "leadRef", "messages", "summary", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
+    },
+    "StudentRegistration": {
+      "title": "StudentRegistration",
+      "description": "Prospective or enrolled student registration record linked to Zacma CRM and student support.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessUnitId": { "type": "string", "maxLength": 128 },
+        "leadId": { "type": "string", "maxLength": 128 },
+        "leadRef": { "type": "string", "maxLength": 40 },
+        "studentUid": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 60 },
+        "email": { "type": "string", "maxLength": 200 },
+        "address": { "type": "string", "maxLength": 300 },
+        "preferredCourse": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "deliveryMethod": { "type": "string", "maxLength": 80 },
+        "preferredSchedule": { "type": "string", "maxLength": 120 },
+        "paymentMethod": { "type": "string", "maxLength": 120 },
+        "registrationStatus": { "type": "string", "enum": ["submitted", "under_review", "approved", "enrolled", "completed"] },
+        "batchName": { "type": "string", "maxLength": 120 },
+        "classSchedule": { "type": "string", "maxLength": 200 },
+        "trainingLocation": { "type": "string", "maxLength": 200 },
+        "paymentStatus": { "type": "string", "enum": ["pending", "partial", "paid"] },
+        "certificateStatus": { "type": "string", "enum": ["not_issued", "in_progress", "issued"] },
+        "documentUploadFormUrl": { "type": "string", "maxLength": 500 },
+        "source": { "type": "string", "enum": ["ai_chat", "public_form", "portal"] },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "businessUnitId", "leadId", "leadRef", "studentUid", "fullName", "phone", "email", "address", "preferredCourse", "deliveryMethod", "preferredSchedule", "paymentMethod", "registrationStatus", "batchName", "classSchedule", "trainingLocation", "paymentStatus", "certificateStatus", "documentUploadFormUrl", "source", "ownerId", "authorizedUserIds", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -344,6 +473,18 @@
     "/publicForms/{publicSlugKey}": {
       "schema": { "$ref": "#/entities/PublicFormProjection" },
       "description": "Sanitized public-facing form schemas readable by exact slug key when published and active."
+    },
+    "/publicSupport/{organizationId}": {
+      "schema": { "$ref": "#/entities/PublicSupportConfig" },
+      "description": "Publicly readable AI Customer Support configuration and welcome message."
+    },
+    "/publicCourses/{courseId}": {
+      "schema": { "$ref": "#/entities/TrainingCourse" },
+      "description": "Administrator-approved Training Institute courses readable by public visitors and the AI assistant."
+    },
+    "/publicFaqs/{faqId}": {
+      "schema": { "$ref": "#/entities/SupportKnowledgeItem" },
+      "description": "Administrator-approved FAQs and student support knowledge readable by public visitors and the AI assistant."
     },
     "/organizations/{organizationId}": {
       "schema": { "$ref": "#/entities/Organization" },
@@ -396,6 +537,14 @@
     "/organizations/{organizationId}/messageTemplates/{templateId}": {
       "schema": { "$ref": "#/entities/MessageTemplate" },
       "description": "Reusable personalized Email and SMS message templates."
+    },
+    "/organizations/{organizationId}/supportConversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/SupportConversation" },
+      "description": "AI customer support transcripts, unanswered questions, and human escalation queue."
+    },
+    "/organizations/{organizationId}/studentRegistrations/{registrationId}": {
+      "schema": { "$ref": "#/entities/StudentRegistration" },
+      "description": "Conversational AI and portal student registration records with strict per-student privacy."
     }
   }
 }

@@ -8,6 +8,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { fetchPublicFormBySlug, submitPublicForm } from '../lib/zacmaService';
+import { SupportChatWidget } from './SupportChatWidget';
 import type { FormField, PublicFormProjection } from '../types';
 
 interface Props {
@@ -252,6 +253,12 @@ export function PublicFormView({
             )}
           </div>
         </div>
+        {!previewForm && (
+          <SupportChatWidget
+            organizationId={formDoc.organizationId}
+            defaultFormUrl={typeof window !== 'undefined' ? window.location.href : ''}
+          />
+        )}
       </div>
     );
   }
@@ -517,6 +524,12 @@ export function PublicFormView({
           </form>
         </div>
       </div>
+      {!previewForm && (
+        <SupportChatWidget
+          organizationId={formDoc.organizationId}
+          defaultFormUrl={typeof window !== 'undefined' ? window.location.href : ''}
+        />
+      )}
     </div>
   );
 }

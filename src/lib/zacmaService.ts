@@ -92,15 +92,28 @@ export function timestampToMillis(ts: unknown): number {
 
 export function mergeTemplateVariables(
   template: string,
-  lead: Pick<Lead, 'fullName' | 'email' | 'phone' | 'leadRef' | 'businessUnitName' | 'formTitle'>
+  lead: Pick<Lead, 'fullName' | 'email' | 'phone' | 'leadRef' | 'businessUnitName' | 'formTitle'> & {
+    courseName?: string;
+    courseFee?: string;
+    responses?: Record<string, unknown>;
+  }
 ): string {
+  const inferredCourse =
+    lead.courseName ||
+    (typeof lead.responses?.preferredCourse === 'string' ? lead.responses.preferredCourse : '') ||
+    (typeof lead.responses?.interestedCourse === 'string' ? lead.responses.interestedCourse : '') ||
+    'Training Program';
+  const inferredFee = lead.courseFee || '8,500 ETB';
+
   return template
     .replace(/\{\{\s*full_name\s*\}\}/gi, lead.fullName || 'Valued Client')
-    .replace(/\{\{\s*business_name\s*\}\}/gi, lead.businessUnitName || 'Zacma')
+    .replace(/\{\{\s*business_name\s*\}\}/gi, lead.businessUnitName || 'Zacma Technology Training Institute')
     .replace(/\{\{\s*lead_ref\s*\}\}/gi, lead.leadRef || '')
     .replace(/\{\{\s*email\s*\}\}/gi, lead.email || '')
     .replace(/\{\{\s*phone\s*\}\}/gi, lead.phone || '')
-    .replace(/\{\{\s*form_title\s*\}\}/gi, lead.formTitle || '');
+    .replace(/\{\{\s*form_title\s*\}\}/gi, lead.formTitle || '')
+    .replace(/\{\{\s*course_name\s*\}\}/gi, inferredCourse)
+    .replace(/\{\{\s*course_fee\s*\}\}/gi, inferredFee);
 }
 
 export function detectDuplicateLeads(
@@ -1046,6 +1059,138 @@ export async function deleteMessageTemplate(organizationId: string, templateId: 
     await deleteDoc(doc(db, path));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+export async function sendDirectCommunication(params: {
+  organizationId: string;
+  ownerId: string;
+  authorizedUserIds: string[];
+  channel: 'email' | 'sms';
+  recipient: string;
+  recipientName: string;
+  subject: string;
+  body: string;
+  actorId: string;
+  actorName: string;
+}): Promise<{ deliveryStatus: CommunicationRecord['deliveryStatus']; provider: string; note?: string }> {
+  const token = await auth.currentUser?.getIdToken();
+  const resp = await fetch('/api/communications/dispatch', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      channel: params.channel,
+      recipient: params.recipient,
+      subject: params.subject,
+      body: params.body,
+    }),
+  });
+
+  const data = (await resp.json()) as {
+    deliveryStatus?: CommunicationRecord['deliveryStatus'];
+    provider?: string;
+    note?: string;
+    error?: string;
+  };
+  if (!resp.ok) {
+    throw new Error(data.error || 'Failed to dispatch communication.');
+  }
+
+  const deliveryStatus: CommunicationRecord['deliveryStatus'] =
+    data.deliveryStatus || 'queued_pending_provider_approval';
+  const provider = data.provider || (params.channel === 'email' ? 'resend_email' : 'twilio_sms');
+
+  await logAuditEvent({
+    organizationId: params.organizationId,
+    ownerId: params.ownerId,
+    authorizedUserIds: params.authorizedUserIds,
+    actorId: params.actorId,
+    actorName: params.actorName,
+    action: `communication.direct_${params.channel}`,
+    resourceType: 'communication',
+    resourceId: clampStr(params.recipient, 128),
+    summary: `Direct ${params.channel.toUpperCase()} (${deliveryStatus}) to ${params.recipientName || params.recipient} via ${provider}`,
+  });
+
+  return { deliveryStatus, provider, note: data.note };
+}
+
+export const ZACMA_STARTER_TEMPLATES: Array<{
+  name: string;
+  channel: 'email' | 'sms';
+  subject: string;
+  body: string;
+}> = [
+  {
+    name: 'Institute Admission Welcome (Email)',
+    channel: 'email',
+    subject: 'Welcome to {{business_name}} — {{course_name}} ({{lead_ref}})',
+    body: 'Dear {{full_name}},\n\nThank you for applying for {{course_name}} at {{business_name}}.\n\nYour registration reference is {{lead_ref}}. Standard tuition for this program is {{course_fee}}.\n\nOur admission advisor will contact you shortly with your class schedule and payment confirmation instructions.\n\nWarm regards,\nAdmissions Office\n{{business_name}}',
+  },
+  {
+    name: 'Registration Confirmation (SMS)',
+    channel: 'sms',
+    subject: '',
+    body: 'Hi {{full_name}}, your {{course_name}} registration at {{business_name}} is received (Ref: {{lead_ref}}). Tuition: {{course_fee}}. Admissions will call you shortly.',
+  },
+  {
+    name: 'Tuition Payment Reminder — 8,500 ETB (Email)',
+    channel: 'email',
+    subject: 'Tuition Payment Reminder: {{course_name}} ({{lead_ref}})',
+    body: 'Dear {{full_name}},\n\nThis is a friendly reminder to complete your tuition payment of {{course_fee}} for {{course_name}} (Reference: {{lead_ref}}) to confirm your seat in the upcoming training batch.\n\nIf you have already completed payment, please reply with your receipt or contact our admissions desk.\n\nBest regards,\n{{business_name}}',
+  },
+  {
+    name: 'Tuition Payment Reminder — 8,500 ETB (SMS)',
+    channel: 'sms',
+    subject: '',
+    body: 'Reminder: Complete your {{course_fee}} tuition for {{course_name}} (Ref {{lead_ref}}) to confirm your seat at {{business_name}}.',
+  },
+  {
+    name: 'Amharic Admission Welcome (SMS)',
+    channel: 'sms',
+    subject: '',
+    body: 'ሰላም {{full_name}}፣ በ{{business_name}} ለ{{course_name}} ስለተመዘገቡ እናመሰግናለን። መለያ ቁጥር፦ {{lead_ref}}። የኮርስ ክፍያ፦ {{course_fee}}።',
+  },
+];
+
+export async function seedStarterMessageTemplates(params: {
+  organizationId: string;
+  ownerId: string;
+  authorizedUserIds: string[];
+  existingTemplates: MessageTemplate[];
+}): Promise<number> {
+  const existingNames = new Set(params.existingTemplates.map((t) => t.name.trim().toLowerCase()));
+  const missing = ZACMA_STARTER_TEMPLATES.filter(
+    (tpl) => !existingNames.has(tpl.name.trim().toLowerCase())
+  );
+  if (missing.length === 0) return 0;
+
+  const authUsers = clampList([...params.authorizedUserIds, params.ownerId], 100);
+  try {
+    const batch = writeBatch(db);
+    for (const tpl of missing) {
+      const id = generateId('tpl');
+      batch.set(doc(db, `organizations/${params.organizationId}/messageTemplates/${id}`), {
+        id,
+        organizationId: params.organizationId,
+        businessUnitId: '',
+        name: clampStr(tpl.name, 140),
+        channel: tpl.channel,
+        subject: clampStr(tpl.subject, 250),
+        body: clampStr(tpl.body, 5000),
+        ownerId: params.ownerId,
+        authorizedUserIds: authUsers,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    await batch.commit();
+    return missing.length;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `organizations/${params.organizationId}/messageTemplates`);
   }
 }
 

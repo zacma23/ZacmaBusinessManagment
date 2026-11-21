@@ -25,6 +25,10 @@ import {
   LogOut,
   Menu,
   X,
+  Bot,
+  BookOpen,
+  HelpCircle,
+  Headphones,
 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PortalProvider, usePortal } from './context/PortalContext';
@@ -38,6 +42,8 @@ import { CrmModule } from './components/CrmModule';
 import { CommunicationsModule } from './components/CommunicationsModule';
 import { IntegrationsSecurityModule } from './components/IntegrationsSecurityModule';
 import { AiAssistantDrawer } from './components/AiAssistantDrawer';
+import { AiSupportAdminModule } from './components/AiSupportAdminModule';
+import { SupportChatWidget } from './components/SupportChatWidget';
 import { canManageForms, canManageOrg } from './lib/zacmaService';
 import type { LeadFilterPreset, NavSection } from './types';
 
@@ -76,6 +82,10 @@ const SECTION_BREADCRUMBS: Record<NavSection, [string, string]> = {
   communication_center: ['CRM', 'Communication Center'],
   message_templates: ['CRM', 'Message Templates'],
   crm_reports: ['CRM', 'CRM Reports'],
+  ai_support_overview: ['AI Customer Support', 'AI Support Control'],
+  ai_support_courses: ['AI Customer Support', 'Course Catalog (18+)'],
+  ai_support_knowledge: ['AI Customer Support', 'Support Knowledge & FAQs'],
+  ai_support_inbox: ['AI Customer Support', 'Support Inbox & Registrations'],
   integrations_security: ['Governance', 'Integrations & Security'],
 };
 
@@ -100,10 +110,14 @@ function PortalWorkspace() {
   const [aiPromptPreset, setAiPromptPreset] = useState<string | undefined>(undefined);
   const [leadFilterPreset, setLeadFilterPreset] = useState<LeadFilterPreset | undefined>(undefined);
   const [commDraftPreset, setCommDraftPreset] = useState<{
-    channel?: 'email' | 'sms';
+    channel?: 'email' | 'sms' | 'both';
     subject?: string;
     body?: string;
+    smsBody?: string;
     businessUnitId?: string;
+    directEmail?: string;
+    directPhone?: string;
+    directName?: string;
   } | null>(null);
 
   const canManageFormsFlag = canManageForms(effectiveRole);
@@ -143,6 +157,15 @@ function PortalWorkspace() {
         ],
       },
       {
+        title: 'AI Customer Support',
+        items: [
+          { id: 'ai_support_overview', label: 'AI Support Control', icon: Bot, visible: canManageOrgFlag || effectiveCrmAccess },
+          { id: 'ai_support_courses', label: 'Course Catalog (18+)', icon: BookOpen, visible: canManageOrgFlag || effectiveCrmAccess },
+          { id: 'ai_support_knowledge', label: 'Knowledge & FAQs', icon: HelpCircle, visible: canManageOrgFlag || effectiveCrmAccess },
+          { id: 'ai_support_inbox', label: 'Support Inbox & Regs', icon: Headphones, visible: canManageOrgFlag || effectiveCrmAccess },
+        ],
+      },
+      {
         title: 'Governance',
         items: [
           { id: 'integrations_security', label: 'Integrations & Security', icon: ShieldCheck, visible: canManageOrgFlag },
@@ -158,7 +181,16 @@ function PortalWorkspace() {
       businessUnitId?: string;
       aiPrompt?: string;
       leadFilter?: LeadFilterPreset;
-      commDraft?: { channel?: 'email' | 'sms'; subject?: string; body?: string; businessUnitId?: string };
+      commDraft?: {
+        channel?: 'email' | 'sms' | 'both';
+        subject?: string;
+        body?: string;
+        smsBody?: string;
+        businessUnitId?: string;
+        directEmail?: string;
+        directPhone?: string;
+        directName?: string;
+      };
     }
   ) => {
     if (preset?.businessUnitId !== undefined) setSelectedBuPreset(preset.businessUnitId);
@@ -340,6 +372,8 @@ function PortalWorkspace() {
                             setNotifOpen(false);
                             if (n.entityType === 'lead' && effectiveCrmAccess) {
                               handleNavigate('all_leads');
+                            } else if (n.entityType === 'followup') {
+                              handleNavigate('ai_support_inbox');
                             }
                           }}
                           className={`w-full text-left px-4 py-3 text-xs hover:bg-slate-50 cursor-pointer ${
@@ -419,6 +453,29 @@ function PortalWorkspace() {
             />
           )}
 
+          {(activeSection === 'ai_support_overview' ||
+            activeSection === 'ai_support_courses' ||
+            activeSection === 'ai_support_knowledge' ||
+            activeSection === 'ai_support_inbox') && (
+            <AiSupportAdminModule
+              activeSection={activeSection}
+              onNavigate={(sec) => handleNavigate(sec)}
+              onMessageStudent={(reg) =>
+                handleNavigate('communication_center', {
+                  commDraft: {
+                    channel: reg.email && reg.phone ? 'both' : reg.phone ? 'sms' : 'email',
+                    directName: reg.fullName,
+                    directEmail: reg.email,
+                    directPhone: reg.phone,
+                    subject: `Zacma Training Institute — ${reg.preferredCourse} (${reg.leadRef})`,
+                    body: `Dear ${reg.fullName},\n\nThank you for registering for ${reg.preferredCourse} at Zacma Technology Training Institute (Ref: ${reg.leadRef}). Tuition is 8,500 ETB. Please reply if you need assistance with your schedule or payment.\n\nWarm regards,\nZacma Admissions`,
+                    smsBody: `Hi ${reg.fullName}, update from Zacma Training Institute on ${reg.preferredCourse} (Ref: ${reg.leadRef}). Tuition: 8,500 ETB.`,
+                  },
+                })
+              }
+            />
+          )}
+
           {activeSection === 'integrations_security' && <IntegrationsSecurityModule />}
         </main>
       </div>
@@ -428,6 +485,12 @@ function PortalWorkspace() {
         open={aiDrawerOpen}
         onClose={() => setAiDrawerOpen(false)}
         onExecuteAction={handleNavigate}
+      />
+
+      {/* Section 8: Floating 24/7 ZACMA AI ASSISTANT Customer Support & Student Widget */}
+      <SupportChatWidget
+        organizationId={organization?.id || 'zacma-hq'}
+        isPortalContext
       />
     </div>
   );

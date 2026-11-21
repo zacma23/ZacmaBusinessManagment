@@ -9,6 +9,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -35,9 +36,19 @@ import type {
   MessageTemplate,
   Organization,
   OrganizationMember,
+  PublicSupportConfig,
+  StudentRegistration,
+  SupportConversation,
+  SupportKnowledgeItem,
+  TrainingCourse,
   UserProfile,
   UserRole,
 } from '../types';
+import {
+  DEFAULT_SUPPORT_AI_INSTRUCTIONS,
+  DEFAULT_SUPPORT_WELCOME_MESSAGE,
+  seedEighteenInstituteCourses,
+} from '../lib/supportService';
 
 interface PortalContextValue {
   user: User | null;
@@ -59,6 +70,11 @@ interface PortalContextValue {
   auditLogs: AuditLog[];
   integrations: IntegrationConfig[];
   notifications: AppNotification[];
+  supportConfig: PublicSupportConfig | null;
+  courses: TrainingCourse[];
+  knowledgeItems: SupportKnowledgeItem[];
+  supportConversations: SupportConversation[];
+  studentRegistrations: StudentRegistration[];
   signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
   markNotificationRead: (notificationId: string) => Promise<void>;
@@ -82,6 +98,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [integrations, setIntegrations] = useState<IntegrationConfig[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [supportConfig, setSupportConfig] = useState<PublicSupportConfig | null>(null);
+  const [courses, setCourses] = useState<TrainingCourse[]>([]);
+  const [knowledgeItems, setKnowledgeItems] = useState<SupportKnowledgeItem[]>([]);
+  const [supportConversations, setSupportConversations] = useState<SupportConversation[]>([]);
+  const [studentRegistrations, setStudentRegistrations] = useState<StudentRegistration[]>([]);
 
   const isBootstrapSuper = Boolean(
     user?.email &&
@@ -105,6 +126,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         setAuditLogs([]);
         setIntegrations([]);
         setNotifications([]);
+        setSupportConfig(null);
+        setCourses([]);
+        setKnowledgeItems([]);
+        setSupportConversations([]);
+        setStudentRegistrations([]);
         setAuthLoading(false);
         return;
       }
@@ -242,6 +268,42 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
 
             await batch.commit();
           }
+
+          // Ensure Section 8 AI Customer Support configuration exists for this organization
+          const supportRef = doc(db, `publicSupport/${orgId}`);
+          const supportSnap = await getDoc(supportRef);
+          if (!supportSnap.exists()) {
+            await setDoc(supportRef, {
+              organizationId: orgId,
+              isActive: true,
+              assistantName: 'ZACMA AI ASSISTANT',
+              welcomeMessage: DEFAULT_SUPPORT_WELCOME_MESSAGE,
+              aiInstructions: DEFAULT_SUPPORT_AI_INSTRUCTIONS,
+              supportedLanguages: ['en', 'am'],
+              trainingInstituteBuId: '',
+              trainingInstituteName: 'Zacma Technology Training Institute',
+              registrationFormUrl: '',
+              orgOwnerId: firebaseUser.uid,
+              updatedAt: serverTimestamp(),
+            });
+          }
+
+          // Ensure all 18 administrator-approved Zacma Training Institute courses (8,500 ETB each) exist in Firestore
+          const existingCoursesSnap = await getDocs(
+            query(collection(db, 'publicCourses'), where('organizationId', '==', orgId))
+          );
+          const existingCoursesList = existingCoursesSnap.docs.map(
+            (d) => d.data() as TrainingCourse
+          );
+          await seedEighteenInstituteCourses({
+            organizationId: orgId,
+            ownerId: firebaseUser.uid,
+            authorizedUserIds: [firebaseUser.uid],
+            existingCourses: existingCoursesList,
+            actorId: firebaseUser.uid,
+            actorName: firebaseUser.displayName || 'Zacma Super Admin',
+            skipAudit: true,
+          });
         }
       } catch (error) {
         console.error('Bootstrap error:', error);
@@ -386,6 +448,92 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       )
     );
 
+    // Section 8: Public AI Support Config
+    unsubs.push(
+      onSnapshot(
+        doc(db, `publicSupport/${orgId}`),
+        (snap) => {
+          setSupportConfig(snap.exists() ? (snap.data() as PublicSupportConfig) : null);
+        },
+        (err) => {
+          console.warn('Public support config read skipped:', err.message);
+          setSupportConfig(null);
+        }
+      )
+    );
+
+    // Section 8: Institute Courses Catalog
+    const coursesQuery = isBootstrapSuper
+      ? query(collection(db, 'publicCourses'), where('organizationId', '==', orgId))
+      : query(
+          collection(db, 'publicCourses'),
+          where('organizationId', '==', orgId),
+          where('authorizedUserIds', 'array-contains', user.uid)
+        );
+    unsubs.push(
+      onSnapshot(
+        coursesQuery,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as TrainingCourse)
+            .sort((a, b) => a.title.localeCompare(b.title));
+          setCourses(list);
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'publicCourses')
+      )
+    );
+
+    // Section 8: Support Knowledge & FAQs
+    const faqsQuery = isBootstrapSuper
+      ? query(collection(db, 'publicFaqs'), where('organizationId', '==', orgId))
+      : query(
+          collection(db, 'publicFaqs'),
+          where('organizationId', '==', orgId),
+          where('authorizedUserIds', 'array-contains', user.uid)
+        );
+    unsubs.push(
+      onSnapshot(
+        faqsQuery,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as SupportKnowledgeItem)
+            .sort((a, b) => timestampToMillis(b.updatedAt) - timestampToMillis(a.updatedAt));
+          setKnowledgeItems(list);
+        },
+        (err) => handleFirestoreError(err, OperationType.LIST, 'publicFaqs')
+      )
+    );
+
+    // Section 8: Support Conversations & Escalations
+    unsubs.push(
+      onSnapshot(
+        makeQuery(`organizations/${orgId}/supportConversations`),
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as SupportConversation)
+            .sort((a, b) => timestampToMillis(b.updatedAt) - timestampToMillis(a.updatedAt));
+          setSupportConversations(list);
+        },
+        (err) =>
+          handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/supportConversations`)
+      )
+    );
+
+    // Section 8: Student Registrations
+    unsubs.push(
+      onSnapshot(
+        makeQuery(`organizations/${orgId}/studentRegistrations`),
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as StudentRegistration)
+            .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
+          setStudentRegistrations(list);
+        },
+        (err) =>
+          handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/studentRegistrations`)
+      )
+    );
+
     return () => {
       unsubs.forEach((fn) => fn());
     };
@@ -491,6 +639,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         auditLogs,
         integrations,
         notifications,
+        supportConfig,
+        courses,
+        knowledgeItems,
+        supportConversations,
+        studentRegistrations,
         signInWithGoogle,
         logout,
         markNotificationRead,

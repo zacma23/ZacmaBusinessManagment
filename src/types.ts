@@ -331,6 +331,140 @@ export interface AppNotification {
   createdAt: unknown;
 }
 
+export interface PublicSupportConfig {
+  organizationId: string;
+  isActive: boolean;
+  assistantName: string;
+  welcomeMessage: string;
+  aiInstructions: string;
+  supportedLanguages: string[];
+  trainingInstituteBuId: string;
+  trainingInstituteName: string;
+  registrationFormUrl: string;
+  orgOwnerId: string;
+  updatedAt: unknown;
+}
+
+export interface TrainingCourse {
+  id: string;
+  organizationId: string;
+  title: string;
+  category: string;
+  description: string;
+  learningObjectives: string[];
+  qualifications: string;
+  duration: string;
+  deliveryMethods: string[];
+  schedules: string;
+  availableBatches: string;
+  certificateInfo: string;
+  approvedFee: string;
+  registrationProcedure: string;
+  isActive: boolean;
+  ownerId: string;
+  authorizedUserIds: string[];
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export type SupportKnowledgeCategory =
+  | 'registration'
+  | 'payment'
+  | 'schedule'
+  | 'location'
+  | 'attendance'
+  | 'certificates'
+  | 'materials'
+  | 'student_services'
+  | 'general';
+
+export interface SupportKnowledgeItem {
+  id: string;
+  organizationId: string;
+  category: SupportKnowledgeCategory;
+  question: string;
+  answer: string;
+  language: 'en' | 'am' | 'both';
+  isActive: boolean;
+  ownerId: string;
+  authorizedUserIds: string[];
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface SupportChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'agent';
+  text: string;
+  timestamp: string;
+}
+
+export interface SupportConversation {
+  id: string;
+  organizationId: string;
+  businessUnitId: string;
+  visitorName: string;
+  visitorPhone: string;
+  visitorEmail: string;
+  studentUid: string;
+  language: 'en' | 'am' | 'other';
+  intent: 'course_inquiry' | 'registration' | 'student_support' | 'escalation' | 'general';
+  interestedCourse: string;
+  status: 'active' | 'escalated' | 'assigned' | 'resolved';
+  assignedAgentId: string;
+  assignedAgentName: string;
+  unansweredQuestions: string[];
+  leadId: string;
+  leadRef: string;
+  messages: SupportChatMessage[];
+  summary: string;
+  ownerId: string;
+  authorizedUserIds: string[];
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface StudentRegistration {
+  id: string;
+  organizationId: string;
+  businessUnitId: string;
+  leadId: string;
+  leadRef: string;
+  studentUid: string;
+  fullName: string;
+  phone: string;
+  email: string;
+  address: string;
+  preferredCourse: string;
+  deliveryMethod: string;
+  preferredSchedule: string;
+  paymentMethod: string;
+  registrationStatus: 'submitted' | 'under_review' | 'approved' | 'enrolled' | 'completed';
+  batchName: string;
+  classSchedule: string;
+  trainingLocation: string;
+  paymentStatus: 'pending' | 'partial' | 'paid';
+  certificateStatus: 'not_issued' | 'in_progress' | 'issued';
+  documentUploadFormUrl: string;
+  source: 'ai_chat' | 'public_form' | 'portal';
+  ownerId: string;
+  authorizedUserIds: string[];
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface RegistrationDraft {
+  fullName?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  preferredCourse?: string;
+  deliveryMethod?: string;
+  preferredSchedule?: string;
+  paymentMethod?: string;
+  readyForConfirmation?: boolean;
+}
+
 export type NavSection =
   | 'business_overview'
   | 'business_units'
@@ -348,6 +482,10 @@ export type NavSection =
   | 'communication_center'
   | 'message_templates'
   | 'crm_reports'
+  | 'ai_support_overview'
+  | 'ai_support_courses'
+  | 'ai_support_knowledge'
+  | 'ai_support_inbox'
   | 'integrations_security';
 
 export interface LeadFilterPreset {

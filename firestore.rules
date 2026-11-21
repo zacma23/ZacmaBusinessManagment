@@ -399,8 +399,122 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidPublicSupportConfig(data) {
+      return data.keys().hasAll(['organizationId', 'isActive', 'assistantName', 'welcomeMessage', 'aiInstructions', 'supportedLanguages', 'trainingInstituteBuId', 'trainingInstituteName', 'registrationFormUrl', 'orgOwnerId', 'updatedAt']) &&
+        data.keys().hasOnly(['organizationId', 'isActive', 'assistantName', 'welcomeMessage', 'aiInstructions', 'supportedLanguages', 'trainingInstituteBuId', 'trainingInstituteName', 'registrationFormUrl', 'orgOwnerId', 'updatedAt']) &&
+        isValidId(data.organizationId) &&
+        data.isActive is bool &&
+        isNonEmptyString(data.assistantName, 100) &&
+        isNonEmptyString(data.welcomeMessage, 1000) &&
+        isBoundedString(data.aiInstructions, 3000) &&
+        isBoundedStringList(data.supportedLanguages, 10) &&
+        isBoundedString(data.trainingInstituteBuId, 128) &&
+        isBoundedString(data.trainingInstituteName, 160) &&
+        isBoundedString(data.registrationFormUrl, 500) &&
+        isValidId(data.orgOwnerId) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTrainingCourse(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'title', 'category', 'description', 'learningObjectives', 'qualifications', 'duration', 'deliveryMethods', 'schedules', 'availableBatches', 'certificateInfo', 'approvedFee', 'registrationProcedure', 'isActive', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'title', 'category', 'description', 'learningObjectives', 'qualifications', 'duration', 'deliveryMethods', 'schedules', 'availableBatches', 'certificateInfo', 'approvedFee', 'registrationProcedure', 'isActive', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isNonEmptyString(data.title, 160) &&
+        isBoundedString(data.category, 100) &&
+        isBoundedString(data.description, 2000) &&
+        isBoundedStringList(data.learningObjectives, 20) &&
+        isBoundedString(data.qualifications, 600) &&
+        isBoundedString(data.duration, 120) &&
+        isBoundedStringList(data.deliveryMethods, 10) &&
+        isBoundedString(data.schedules, 600) &&
+        isBoundedString(data.availableBatches, 600) &&
+        isBoundedString(data.certificateInfo, 600) &&
+        isBoundedString(data.approvedFee, 200) &&
+        isBoundedString(data.registrationProcedure, 1000) &&
+        data.isActive is bool &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSupportKnowledge(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'category', 'question', 'answer', 'language', 'isActive', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'category', 'question', 'answer', 'language', 'isActive', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        data.category in ['registration', 'payment', 'schedule', 'location', 'attendance', 'certificates', 'materials', 'student_services', 'general'] &&
+        isNonEmptyString(data.question, 400) &&
+        isNonEmptyString(data.answer, 3000) &&
+        data.language in ['en', 'am', 'both'] &&
+        data.isActive is bool &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSupportConversation(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'businessUnitId', 'visitorName', 'visitorPhone', 'visitorEmail', 'studentUid', 'language', 'intent', 'interestedCourse', 'status', 'assignedAgentId', 'assignedAgentName', 'unansweredQuestions', 'leadId', 'leadRef', 'messages', 'summary', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'businessUnitId', 'visitorName', 'visitorPhone', 'visitorEmail', 'studentUid', 'language', 'intent', 'interestedCourse', 'status', 'assignedAgentId', 'assignedAgentName', 'unansweredQuestions', 'leadId', 'leadRef', 'messages', 'summary', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isBoundedString(data.businessUnitId, 128) &&
+        isBoundedString(data.visitorName, 160) &&
+        isBoundedString(data.visitorPhone, 60) &&
+        isBoundedString(data.visitorEmail, 200) &&
+        isBoundedString(data.studentUid, 128) &&
+        data.language in ['en', 'am', 'other'] &&
+        data.intent in ['course_inquiry', 'registration', 'student_support', 'escalation', 'general'] &&
+        isBoundedString(data.interestedCourse, 160) &&
+        data.status in ['active', 'escalated', 'assigned', 'resolved'] &&
+        isBoundedString(data.assignedAgentId, 128) &&
+        isBoundedString(data.assignedAgentName, 120) &&
+        isBoundedStringList(data.unansweredQuestions, 30) &&
+        isBoundedString(data.leadId, 128) &&
+        isBoundedString(data.leadRef, 40) &&
+        data.messages is list && data.messages.size() <= 120 &&
+        isBoundedString(data.summary, 1000) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudentRegistration(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'businessUnitId', 'leadId', 'leadRef', 'studentUid', 'fullName', 'phone', 'email', 'address', 'preferredCourse', 'deliveryMethod', 'preferredSchedule', 'paymentMethod', 'registrationStatus', 'batchName', 'classSchedule', 'trainingLocation', 'paymentStatus', 'certificateStatus', 'documentUploadFormUrl', 'source', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'businessUnitId', 'leadId', 'leadRef', 'studentUid', 'fullName', 'phone', 'email', 'address', 'preferredCourse', 'deliveryMethod', 'preferredSchedule', 'paymentMethod', 'registrationStatus', 'batchName', 'classSchedule', 'trainingLocation', 'paymentStatus', 'certificateStatus', 'documentUploadFormUrl', 'source', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isBoundedString(data.businessUnitId, 128) &&
+        isBoundedString(data.leadId, 128) &&
+        isNonEmptyString(data.leadRef, 40) &&
+        isBoundedString(data.studentUid, 128) &&
+        isNonEmptyString(data.fullName, 160) &&
+        isNonEmptyString(data.phone, 60) &&
+        isBoundedString(data.email, 200) &&
+        isBoundedString(data.address, 300) &&
+        isNonEmptyString(data.preferredCourse, 160) &&
+        isBoundedString(data.deliveryMethod, 80) &&
+        isBoundedString(data.preferredSchedule, 120) &&
+        isBoundedString(data.paymentMethod, 120) &&
+        data.registrationStatus in ['submitted', 'under_review', 'approved', 'enrolled', 'completed'] &&
+        isBoundedString(data.batchName, 120) &&
+        isBoundedString(data.classSchedule, 200) &&
+        isBoundedString(data.trainingLocation, 200) &&
+        data.paymentStatus in ['pending', 'partial', 'paid'] &&
+        data.certificateStatus in ['not_issued', 'in_progress', 'issued'] &&
+        isBoundedString(data.documentUploadFormUrl, 500) &&
+        data.source in ['ai_chat', 'public_form', 'portal'] &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // =========================================================================
-    // PUBLIC FORM HELPER (VALIDATES ACTIVE PUBLISHED FORM FOR PUBLIC WRITES)
+    // PUBLIC FORM & AI SUPPORT HELPERS
     // =========================================================================
 
     function isActivePublicForm(slugKey, orgId, buId, formId) {
@@ -411,6 +525,16 @@ service cloud.firestore {
         get(/databases/$(database)/documents/publicForms/$(slugKey)).data.organizationId == orgId &&
         get(/databases/$(database)/documents/publicForms/$(slugKey)).data.businessUnitId == buId &&
         get(/databases/$(database)/documents/publicForms/$(slugKey)).data.formId == formId;
+    }
+
+    function isActivePublicSupport(orgId) {
+      return isValidId(orgId) &&
+        exists(/databases/$(database)/documents/publicSupport/$(orgId)) &&
+        get(/databases/$(database)/documents/publicSupport/$(orgId)).data.isActive == true;
+    }
+
+    function publicSupportOwner(orgId) {
+      return get(/databases/$(database)/documents/publicSupport/$(orgId)).data.orgOwnerId;
     }
 
     // =========================================================================
@@ -475,6 +599,76 @@ service cloud.firestore {
         isOrgSuperOrAdmin(existing().organizationId) ||
         isBuManagerFor(existing().organizationId, existing().businessUnitId)
       );
+    }
+
+    // =========================================================================
+    // SECTION 8: PUBLIC AI SUPPORT CONFIG, COURSES & KNOWLEDGE BASE
+    // =========================================================================
+
+    match /publicSupport/{organizationId} {
+      allow get: if isValidId(organizationId);
+      allow list: if false;
+      allow create: if isValidId(organizationId) && isVerifiedUser() &&
+        isValidPublicSupportConfig(incoming()) &&
+        incoming().organizationId == organizationId &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(organizationId);
+      allow update: if isValidId(organizationId) && isVerifiedUser() &&
+        isValidPublicSupportConfig(incoming()) &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().orgOwnerId == existing().orgOwnerId &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(organizationId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'assistantName', 'welcomeMessage', 'aiInstructions', 'supportedLanguages', 'trainingInstituteBuId', 'trainingInstituteName', 'registrationFormUrl', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /publicCourses/{courseId} {
+      allow get: if isValidId(courseId) && (
+        existing().isActive == true || canReadOrgRecord(existing())
+      );
+      allow list: if existing().isActive == true || (isSignedIn() && canReadOrgRecord(existing()));
+      allow create: if isValidId(courseId) && isVerifiedUser() &&
+        isValidTrainingCourse(incoming()) &&
+        incoming().id == courseId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(incoming().organizationId);
+      allow update: if isValidId(courseId) && isVerifiedUser() &&
+        isValidTrainingCourse(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(existing().organizationId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'description', 'learningObjectives', 'qualifications', 'duration', 'deliveryMethods', 'schedules', 'availableBatches', 'certificateInfo', 'approvedFee', 'registrationProcedure', 'isActive', 'authorizedUserIds', 'updatedAt']);
+      allow delete: if isValidId(courseId) && isVerifiedUser() &&
+        isOrgSuperOrAdmin(existing().organizationId);
+    }
+
+    match /publicFaqs/{faqId} {
+      allow get: if isValidId(faqId) && (
+        existing().isActive == true || canReadOrgRecord(existing())
+      );
+      allow list: if existing().isActive == true || (isSignedIn() && canReadOrgRecord(existing()));
+      allow create: if isValidId(faqId) && isVerifiedUser() &&
+        isValidSupportKnowledge(incoming()) &&
+        incoming().id == faqId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(incoming().organizationId);
+      allow update: if isValidId(faqId) && isVerifiedUser() &&
+        isValidSupportKnowledge(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(existing().organizationId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['category', 'question', 'answer', 'language', 'isActive', 'authorizedUserIds', 'updatedAt']);
+      allow delete: if isValidId(faqId) && isVerifiedUser() &&
+        isOrgSuperOrAdmin(existing().organizationId);
     }
 
     // =========================================================================
@@ -650,6 +844,17 @@ service cloud.firestore {
               incoming().authorizedUserIds[0] == incoming().ownerId &&
               existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/formSubmissions/$(incoming().submissionId))
             ) || (
+              incoming().source == 'ai_chat' &&
+              incoming().status == 'new' &&
+              incoming().priority == 'medium' &&
+              incoming().assignedStaffId == '' &&
+              incoming().assignedStaffName == '' &&
+              isActivePublicSupport(organizationId) &&
+              incoming().ownerId == publicSupportOwner(organizationId) &&
+              incoming().authorizedUserIds.size() == 1 &&
+              incoming().authorizedUserIds[0] == incoming().ownerId &&
+              existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/supportConversations/$(incoming().submissionId))
+            ) || (
               isVerifiedUser() && isStaffForOrg(organizationId)
             )
           );
@@ -692,7 +897,7 @@ service cloud.firestore {
             incoming().createdAt == request.time && (
               (
                 incoming().type == 'submission' &&
-                incoming().actorId == 'public_visitor' &&
+                incoming().actorId in ['public_visitor', 'ai_support_visitor'] &&
                 !exists(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId)) &&
                 existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId))
               ) || (
@@ -784,6 +989,12 @@ service cloud.firestore {
               !exists(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(incoming().entityId)) &&
               existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(incoming().entityId))
             ) || (
+              incoming().entityType == 'followup' &&
+              isActivePublicSupport(organizationId) &&
+              incoming().ownerId == publicSupportOwner(organizationId) &&
+              !exists(/databases/$(database)/documents/organizations/$(organizationId)/supportConversations/$(incoming().entityId)) &&
+              existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/supportConversations/$(incoming().entityId))
+            ) || (
               isVerifiedUser() && isStaffForOrg(organizationId)
             )
           );
@@ -837,6 +1048,107 @@ service cloud.firestore {
           isOrgSuperOrAdmin(organizationId) &&
           incoming().diff(existing()).affectedKeys().hasOnly(['approvalStatus', 'approvedBy', 'estimatedCost', 'purpose', 'authorizedUserIds', 'updatedAt']);
         allow delete: if false;
+      }
+
+      // -----------------------------------------------------------------------
+      // SECTION 8: AI SUPPORT CONVERSATIONS (PRIVACY-ISOLATED)
+      // -----------------------------------------------------------------------
+      match /supportConversations/{conversationId} {
+        allow get: if isValidId(organizationId) && isValidId(conversationId) && (
+          canReadOrgRecord(existing()) ||
+          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+        );
+        allow list: if isSignedIn() && (
+          canReadOrgRecord(existing()) ||
+          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+        );
+        allow create: if isValidId(organizationId) && isValidId(conversationId) &&
+          isValidSupportConversation(incoming()) &&
+          incoming().id == conversationId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time && (
+            (
+              isActivePublicSupport(organizationId) &&
+              incoming().ownerId == publicSupportOwner(organizationId) &&
+              incoming().authorizedUserIds.size() == 1 &&
+              incoming().authorizedUserIds[0] == incoming().ownerId &&
+              incoming().assignedAgentId == '' &&
+              incoming().assignedAgentName == '' &&
+              incoming().status in ['active', 'escalated'] &&
+              (incoming().studentUid == '' || (isVerifiedUser() && incoming().studentUid == request.auth.uid))
+            ) || (
+              isVerifiedUser() && isStaffForOrg(organizationId)
+            )
+          );
+        allow update: if isValidId(organizationId) && isValidId(conversationId) && isVerifiedUser() &&
+          isValidSupportConversation(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            (
+              isStaffForOrg(organizationId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'assignedAgentId', 'assignedAgentName', 'messages', 'unansweredQuestions', 'summary', 'leadId', 'leadRef', 'authorizedUserIds', 'updatedAt'])
+            ) || (
+              existing().studentUid != '' &&
+              existing().studentUid == request.auth.uid &&
+              incoming().studentUid == existing().studentUid &&
+              incoming().status in ['active', 'escalated'] &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['messages', 'summary', 'intent', 'interestedCourse', 'unansweredQuestions', 'status', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(organizationId) && isValidId(conversationId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
+      }
+
+      // -----------------------------------------------------------------------
+      // SECTION 8: STUDENT REGISTRATIONS (AUTHENTICATED STUDENT + STAFF ONLY)
+      // -----------------------------------------------------------------------
+      match /studentRegistrations/{registrationId} {
+        allow get: if isValidId(organizationId) && isValidId(registrationId) && (
+          canReadOrgRecord(existing()) ||
+          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+        );
+        allow list: if isSignedIn() && (
+          canReadOrgRecord(existing()) ||
+          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+        );
+        allow create: if isValidId(organizationId) && isValidId(registrationId) &&
+          isValidStudentRegistration(incoming()) &&
+          incoming().id == registrationId &&
+          incoming().organizationId == organizationId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time && (
+            (
+              incoming().source == 'ai_chat' &&
+              incoming().registrationStatus == 'submitted' &&
+              incoming().paymentStatus == 'pending' &&
+              incoming().certificateStatus == 'not_issued' &&
+              isActivePublicSupport(organizationId) &&
+              incoming().ownerId == publicSupportOwner(organizationId) &&
+              incoming().authorizedUserIds.size() == 1 &&
+              incoming().authorizedUserIds[0] == incoming().ownerId &&
+              (incoming().studentUid == '' || (isVerifiedUser() && incoming().studentUid == request.auth.uid)) &&
+              existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(incoming().leadId))
+            ) || (
+              isVerifiedUser() && isStaffForOrg(organizationId)
+            )
+          );
+        allow update: if isValidId(organizationId) && isValidId(registrationId) && isVerifiedUser() &&
+          isValidStudentRegistration(incoming()) &&
+          incoming().id == existing().id &&
+          incoming().organizationId == existing().organizationId &&
+          incoming().leadId == existing().leadId &&
+          incoming().leadRef == existing().leadRef &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isStaffForOrg(organizationId) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['registrationStatus', 'batchName', 'classSchedule', 'trainingLocation', 'paymentStatus', 'certificateStatus', 'documentUploadFormUrl', 'authorizedUserIds', 'updatedAt']);
+        allow delete: if isValidId(organizationId) && isValidId(registrationId) && isVerifiedUser() &&
+          isOrgSuperOrAdmin(organizationId);
       }
     }
   }
