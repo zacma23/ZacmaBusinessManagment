@@ -32,6 +32,8 @@ import {
   Store,
   CreditCard,
   ChevronsUpDown,
+  AlertTriangle,
+  Clock,
 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PortalProvider, usePortal } from './context/PortalContext';
@@ -49,6 +51,7 @@ import { IntegrationsSecurityModule } from './components/IntegrationsSecurityMod
 import { AiAssistantDrawer } from './components/AiAssistantDrawer';
 import { AiSupportAdminModule } from './components/AiSupportAdminModule';
 import { SupportChatWidget } from './components/SupportChatWidget';
+import { StudentPortalView } from './components/StudentPortalView';
 import { canManageForms, canManageOrg } from './lib/zacmaService';
 import type { LeadFilterPreset, NavSection } from './types';
 
@@ -77,7 +80,7 @@ interface NavGroup {
 const SECTION_BREADCRUMBS: Record<NavSection, [string, string]> = {
   business_overview: ['Business Management', 'Business Overview'],
   business_units: ['Business Management', 'Business Units'],
-  business_staff: ['Business Management', 'Business Staff'],
+  business_staff: ['Business Management', 'User Management & RBAC'],
   business_reports: ['Business Management', 'Business Reports'],
   ai_form_generator: ['Form Management', 'AI Form Generator'],
   form_builder: ['Form Management', 'Form Builder'],
@@ -103,12 +106,18 @@ const SECTION_BREADCRUMBS: Record<NavSection, [string, string]> = {
 function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void }) {
   const {
     user,
+    profile,
     organization,
     myOrganizations,
     currentTenantSubscription,
     effectiveRole,
     effectiveCrmAccess,
+    effectivePermissions,
     isPlatformOwner,
+    isStudent,
+    subscriptionPolicy,
+    sessionWarningSeconds,
+    extendSession,
     notifications,
     markNotificationRead,
     switchOrganization,
@@ -136,8 +145,11 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
     directName?: string;
   } | null>(null);
 
-  const canManageFormsFlag = canManageForms(effectiveRole);
-  const canManageOrgFlag = canManageOrg(effectiveRole);
+  const canManageFormsFlag = canManageForms(effectiveRole) || effectivePermissions.forms;
+  const canManageOrgFlag = canManageOrg(effectiveRole) || effectivePermissions.userManagement;
+  const canAccessComms = effectiveCrmAccess || effectivePermissions.communications;
+  const canAccessAiSupport = canManageOrgFlag || effectiveCrmAccess || effectivePermissions.aiSupport;
+  const canAccessBilling = canManageOrg(effectiveRole) || effectivePermissions.billing;
 
   const navGroups: NavGroup[] = useMemo(
     () => [
@@ -146,8 +158,13 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
         items: [
           { id: 'business_overview', label: 'Business Overview', icon: LayoutDashboard, visible: true },
           { id: 'business_units', label: 'Business Units', icon: Building2, visible: true },
-          { id: 'business_staff', label: 'Business Staff', icon: Users, visible: canManageOrgFlag },
-          { id: 'business_reports', label: 'Business Reports', icon: BarChart3, visible: true },
+          { id: 'business_staff', label: 'User Management', icon: Users, visible: canManageOrgFlag },
+          {
+            id: 'business_reports',
+            label: 'Business Reports',
+            icon: BarChart3,
+            visible: effectivePermissions.reports || canManageOrgFlag,
+          },
         ],
       },
       {
@@ -156,7 +173,12 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
           { id: 'ai_form_generator', label: 'AI Form Generator', icon: Sparkles, visible: canManageFormsFlag },
           { id: 'form_builder', label: 'Form Builder', icon: Wrench, visible: canManageFormsFlag },
           { id: 'published_forms', label: 'Published Forms', icon: Globe, visible: true },
-          { id: 'form_submissions', label: 'Form Submissions', icon: Inbox, visible: effectiveCrmAccess || canManageFormsFlag },
+          {
+            id: 'form_submissions',
+            label: 'Form Submissions',
+            icon: Inbox,
+            visible: effectiveCrmAccess || canManageFormsFlag,
+          },
           { id: 'form_analytics', label: 'Form Analytics', icon: PieChart, visible: true },
         ],
       },
@@ -167,25 +189,25 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
           { id: 'all_leads', label: 'All Leads', icon: Contact, visible: effectiveCrmAccess },
           { id: 'lead_pipeline', label: 'Lead Pipeline', icon: Kanban, visible: effectiveCrmAccess },
           { id: 'follow_ups', label: 'Follow-ups', icon: CalendarClock, visible: effectiveCrmAccess },
-          { id: 'communication_center', label: 'Communication Center', icon: Send, visible: effectiveCrmAccess },
-          { id: 'message_templates', label: 'Message Templates', icon: FileCode2, visible: effectiveCrmAccess },
+          { id: 'communication_center', label: 'Communication Center', icon: Send, visible: canAccessComms },
+          { id: 'message_templates', label: 'Message Templates', icon: FileCode2, visible: canAccessComms },
           { id: 'crm_reports', label: 'CRM Reports', icon: TrendingUp, visible: effectiveCrmAccess },
         ],
       },
       {
         title: 'AI Customer Support',
         items: [
-          { id: 'ai_support_overview', label: 'AI Support Control', icon: Bot, visible: canManageOrgFlag || effectiveCrmAccess },
-          { id: 'ai_support_courses', label: 'Course Catalog (18+)', icon: BookOpen, visible: canManageOrgFlag || effectiveCrmAccess },
-          { id: 'ai_support_knowledge', label: 'Knowledge & FAQs', icon: HelpCircle, visible: canManageOrgFlag || effectiveCrmAccess },
-          { id: 'ai_support_inbox', label: 'Support Inbox & Regs', icon: Headphones, visible: canManageOrgFlag || effectiveCrmAccess },
+          { id: 'ai_support_overview', label: 'AI Support Control', icon: Bot, visible: canAccessAiSupport },
+          { id: 'ai_support_courses', label: 'Course Catalog (18+)', icon: BookOpen, visible: canAccessAiSupport },
+          { id: 'ai_support_knowledge', label: 'Knowledge & FAQs', icon: HelpCircle, visible: canAccessAiSupport },
+          { id: 'ai_support_inbox', label: 'Support Inbox & Regs', icon: Headphones, visible: canAccessAiSupport },
         ],
       },
       {
         title: 'SaaS Platform',
         items: [
           { id: 'saas_platform_console', label: 'Platform SaaS Console', icon: Store, visible: isPlatformOwner },
-          { id: 'tenant_billing', label: 'Billing & Plan', icon: CreditCard, visible: canManageOrgFlag },
+          { id: 'tenant_billing', label: 'Billing & Plan', icon: CreditCard, visible: canAccessBilling },
         ],
       },
       {
@@ -195,8 +217,22 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
         ],
       },
     ],
-    [canManageFormsFlag, canManageOrgFlag, effectiveCrmAccess, isPlatformOwner]
+    [
+      canManageFormsFlag,
+      canManageOrgFlag,
+      effectiveCrmAccess,
+      effectivePermissions.reports,
+      canAccessComms,
+      canAccessAiSupport,
+      canAccessBilling,
+      isPlatformOwner,
+    ]
   );
+
+  // Strictly route Student / Customer accounts to their isolated self-service portal
+  if (isStudent) {
+    return <StudentPortalView />;
+  }
 
   const handleNavigate = (
     section: NavSection,
@@ -343,9 +379,10 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
             <div className="text-xs font-semibold text-slate-900 truncate">
-              {user?.displayName || user?.email}
+              {profile?.displayName || user?.displayName || user?.email}
             </div>
-            <div className="text-[11px] text-slate-500 capitalize">
+            <div className="text-[11px] text-slate-500 capitalize truncate">
+              {profile?.username ? `@${profile.username} · ` : ''}
               {isPlatformOwner ? 'Platform Owner' : effectiveRole.replace('_', ' ')}
             </div>
           </div>
@@ -478,6 +515,45 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
             </button>
           </div>
         </header>
+
+        {/* Session Inactivity Timeout Warning Banner */}
+        {sessionWarningSeconds !== null && (
+          <div className="bg-amber-50 border-b border-amber-200 px-5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                For your security, your session will automatically sign out in{' '}
+                <strong className="font-mono">{sessionWarningSeconds}s</strong> due to inactivity.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={extendSession}
+              className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-md cursor-pointer"
+            >
+              Stay Signed In
+            </button>
+          </div>
+        )}
+
+        {/* Non-Blocking Subscription Renewal Banner (Never locks tenants out of viewing existing data) */}
+        {subscriptionPolicy.bannerMessage && (
+          <div className="bg-red-50 border-b border-red-200 px-5 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-red-900">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+              <span>{subscriptionPolicy.bannerMessage}</span>
+            </div>
+            {canAccessBilling && (
+              <button
+                type="button"
+                onClick={() => handleNavigate('tenant_billing')}
+                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-md shrink-0 cursor-pointer"
+              >
+                Manage Billing &amp; Renew
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Active Module Viewport */}
         <main className="flex-1 p-5 sm:p-6 lg:p-8 max-w-[1440px] w-full mx-auto">

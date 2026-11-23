@@ -4,7 +4,19 @@ export type UserRole =
   | 'bu_manager'
   | 'staff'
   | 'accountant'
-  | 'instructor';
+  | 'instructor'
+  | 'student';
+
+export interface MemberPermissions {
+  businessUnits: boolean;
+  forms: boolean;
+  crm: boolean;
+  communications: boolean;
+  aiSupport: boolean;
+  reports: boolean;
+  userManagement: boolean;
+  billing: boolean;
+}
 
 export type DuplicateMatchMode =
   | 'email_or_phone'
@@ -69,6 +81,12 @@ export interface UserProfile {
   email: string;
   displayName: string;
   photoURL?: string;
+  username?: string;
+  phone?: string;
+  authProvider?: 'google' | 'username_password';
+  mustChangePassword?: boolean;
+  status?: 'active' | 'inactive' | 'suspended';
+  lastLoginAt?: string;
   organizationId: string;
   role: UserRole;
   crmAccess: boolean;
@@ -93,15 +111,61 @@ export interface OrganizationMember {
   userId: string;
   organizationId: string;
   email: string;
+  username?: string;
+  phone?: string;
   displayName: string;
   role: UserRole;
   crmAccess: boolean;
+  permissions?: MemberPermissions;
+  authProvider?: 'google' | 'username_password';
+  mustChangePassword?: boolean;
+  lastLoginAt?: string;
   assignedBusinessUnitIds: string[];
-  status: 'active' | 'inactive' | 'invited';
+  status: 'active' | 'inactive' | 'invited' | 'suspended';
   ownerId: string;
   authorizedUserIds: string[];
   createdAt: unknown;
   updatedAt: unknown;
+}
+
+export interface UsernameLookup {
+  username: string;
+  loginEmail: string;
+  uid: string;
+  organizationId: string;
+  status: 'active' | 'inactive' | 'suspended';
+  ownerId: string;
+  authorizedUserIds: string[];
+  updatedAt: unknown;
+}
+
+export interface LoginActivityRecord {
+  id: string;
+  organizationId: string;
+  userId: string;
+  username: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  authMethod: 'google' | 'username_password';
+  eventType: 'login' | 'logout' | 'password_change' | 'password_reset_requested';
+  userAgent: string;
+  domain: string;
+  ownerId: string;
+  authorizedUserIds: string[];
+  createdAt: unknown;
+}
+
+export interface SubscriptionPolicy {
+  status: SaasTenantStatus | 'none';
+  isReadOnly: boolean;
+  isSuspended: boolean;
+  isExpired: boolean;
+  canPublishForms: boolean;
+  canDispatchBulkMessages: boolean;
+  canCreateBusinessUnits: boolean;
+  canCreateUsers: boolean;
+  bannerMessage: string | null;
 }
 
 export interface BusinessUnit {

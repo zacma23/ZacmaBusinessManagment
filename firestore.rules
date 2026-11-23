@@ -32,6 +32,10 @@ service cloud.firestore {
       return key is string && key.size() >= 3 && key.size() <= 180 && key.matches('^[a-z0-9_\\-]+$');
     }
 
+    function isValidUsername(u) {
+      return u is string && u.size() >= 3 && u.size() <= 40 && u.matches('^[a-z0-9._\\-]+$');
+    }
+
     function isNonEmptyString(val, maxLen) {
       return val is string && val.size() >= 1 && val.size() <= maxLen;
     }
@@ -61,7 +65,7 @@ service cloud.firestore {
     }
 
     function hasMemberDoc(orgId) {
-      return isVerifiedUser() && exists(memberPath(orgId, request.auth.uid));
+      return isSignedIn() && exists(memberPath(orgId, request.auth.uid));
     }
 
     function getMemberRole(orgId) {
@@ -111,13 +115,19 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'username', 'phone', 'authProvider', 'mustChangePassword', 'status', 'lastLoginAt', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         isBoundedString(data.email, 200) &&
         isBoundedString(data.displayName, 120) &&
         (!('photoURL' in data) || isBoundedString(data.photoURL, 500)) &&
+        (!('username' in data) || data.username == '' || isValidUsername(data.username)) &&
+        (!('phone' in data) || isBoundedString(data.phone, 60)) &&
+        (!('authProvider' in data) || data.authProvider in ['google', 'username_password']) &&
+        (!('mustChangePassword' in data) || data.mustChangePassword is bool) &&
+        (!('status' in data) || data.status in ['active', 'inactive', 'suspended']) &&
+        (!('lastLoginAt' in data) || isBoundedString(data.lastLoginAt, 40)) &&
         isValidId(data.organizationId) &&
-        data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor'] &&
+        data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor', 'student'] &&
         data.crmAccess is bool &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -140,19 +150,57 @@ service cloud.firestore {
 
     function isValidOrgMember(data) {
       return data.keys().hasAll(['userId', 'organizationId', 'email', 'displayName', 'role', 'crmAccess', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['userId', 'organizationId', 'email', 'displayName', 'role', 'crmAccess', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'organizationId', 'email', 'username', 'phone', 'displayName', 'role', 'crmAccess', 'permissions', 'authProvider', 'mustChangePassword', 'lastLoginAt', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
         isValidId(data.userId) &&
         isValidId(data.organizationId) &&
         isBoundedString(data.email, 200) &&
+        (!('username' in data) || data.username == '' || isValidUsername(data.username)) &&
+        (!('phone' in data) || isBoundedString(data.phone, 60)) &&
         isBoundedString(data.displayName, 120) &&
-        data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor'] &&
+        data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor', 'student'] &&
         data.crmAccess is bool &&
+        (!('permissions' in data) || data.permissions is map) &&
+        (!('authProvider' in data) || data.authProvider in ['google', 'username_password']) &&
+        (!('mustChangePassword' in data) || data.mustChangePassword is bool) &&
+        (!('lastLoginAt' in data) || isBoundedString(data.lastLoginAt, 40)) &&
         isBoundedStringList(data.assignedBusinessUnitIds, 50) &&
-        data.status in ['active', 'inactive', 'invited'] &&
+        data.status in ['active', 'inactive', 'invited', 'suspended'] &&
         isValidId(data.ownerId) &&
         isBoundedStringList(data.authorizedUserIds, 100) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
+    }
+
+    function isValidUsernameLookup(data) {
+      return data.keys().hasAll(['username', 'loginEmail', 'uid', 'organizationId', 'status', 'ownerId', 'authorizedUserIds', 'updatedAt']) &&
+        data.keys().hasOnly(['username', 'loginEmail', 'uid', 'organizationId', 'status', 'ownerId', 'authorizedUserIds', 'updatedAt']) &&
+        isValidUsername(data.username) &&
+        isNonEmptyString(data.loginEmail, 200) &&
+        isValidId(data.uid) &&
+        isValidId(data.organizationId) &&
+        data.status in ['active', 'inactive', 'suspended'] &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLoginActivity(data) {
+      return data.keys().hasAll(['id', 'organizationId', 'userId', 'username', 'email', 'displayName', 'role', 'authMethod', 'eventType', 'userAgent', 'domain', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'organizationId', 'userId', 'username', 'email', 'displayName', 'role', 'authMethod', 'eventType', 'userAgent', 'domain', 'ownerId', 'authorizedUserIds', 'createdAt']) &&
+        isValidId(data.id) &&
+        isValidId(data.organizationId) &&
+        isValidId(data.userId) &&
+        isBoundedString(data.username, 60) &&
+        isBoundedString(data.email, 200) &&
+        isBoundedString(data.displayName, 120) &&
+        data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor', 'student'] &&
+        data.authMethod in ['google', 'username_password'] &&
+        data.eventType in ['login', 'logout', 'password_change', 'password_reset_requested'] &&
+        isBoundedString(data.userAgent, 260) &&
+        isBoundedString(data.domain, 160) &&
+        isValidId(data.ownerId) &&
+        isBoundedStringList(data.authorizedUserIds, 100) &&
+        data.createdAt is timestamp;
     }
 
     function isValidBusinessUnit(data) {
@@ -640,28 +688,41 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow get: if isValidId(userId) && isSignedIn() && (
-        request.auth.uid == userId || isBootstrapSuperAdmin()
+        request.auth.uid == userId ||
+        isBootstrapSuperAdmin() ||
+        isOrgSuperOrAdmin(existing().organizationId)
       );
       allow list: if isBootstrapSuperAdmin();
-      allow create: if isValidId(userId) && isVerifiedUser() &&
+      allow create: if isValidId(userId) && isSignedIn() &&
         isValidUserProfile(incoming()) &&
         incoming().uid == userId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time && (
           isBootstrapSuperAdmin() || (
+            isOrgSuperOrAdmin(incoming().organizationId) &&
+            incoming().role != 'super_admin'
+          ) || (
+            isVerifiedUser() &&
             request.auth.uid == userId &&
             incoming().role == 'staff' &&
             incoming().crmAccess == false
           )
         );
-      allow update: if isValidId(userId) && isVerifiedUser() &&
+      allow update: if isValidId(userId) && isSignedIn() &&
         isValidUserProfile(incoming()) &&
         incoming().uid == existing().uid &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
-          (isBootstrapSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'organizationId', 'role', 'crmAccess', 'updatedAt'])) ||
-          (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt'])) ||
+          (isBootstrapSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'username', 'phone', 'organizationId', 'role', 'crmAccess', 'status', 'mustChangePassword', 'lastLoginAt', 'updatedAt'])) ||
           (
+            isOrgSuperOrAdmin(existing().organizationId) &&
+            incoming().organizationId == existing().organizationId &&
+            incoming().role != 'super_admin' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'username', 'phone', 'role', 'crmAccess', 'status', 'mustChangePassword', 'updatedAt'])
+          ) ||
+          (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'phone', 'mustChangePassword', 'lastLoginAt', 'updatedAt'])) ||
+          (
+            isVerifiedUser() &&
             request.auth.uid == userId &&
             incoming().role == 'super_admin' &&
             incoming().crmAccess == true &&
@@ -670,7 +731,34 @@ service cloud.firestore {
             getAfter(/databases/$(database)/documents/organizations/$(incoming().organizationId)).data.ownerId == request.auth.uid
           )
         );
-      allow delete: if false;
+      allow delete: if isValidId(userId) && isSignedIn() && userId != request.auth.uid && (
+        isBootstrapSuperAdmin() ||
+        (isOrgSuperOrAdmin(existing().organizationId) && existing().role != 'super_admin')
+      );
+    }
+
+    // =========================================================================
+    // USERNAME LOOKUP INDEX (EXACT-MATCH GET FOR LOGIN; ADMIN-MANAGED WRITES)
+    // =========================================================================
+
+    match /usernameLookup/{username} {
+      allow get: if isValidUsername(username);
+      allow list: if isSignedIn() && canReadOrgRecord(existing());
+      allow create: if isValidUsername(username) && isSignedIn() &&
+        isValidUsernameLookup(incoming()) &&
+        incoming().username == username &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(incoming().organizationId);
+      allow update: if isValidUsername(username) && isSignedIn() &&
+        isValidUsernameLookup(incoming()) &&
+        incoming().username == existing().username &&
+        incoming().uid == existing().uid &&
+        incoming().organizationId == existing().organizationId &&
+        incoming().updatedAt == request.time &&
+        isOrgSuperOrAdmin(existing().organizationId) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['loginEmail', 'status', 'authorizedUserIds', 'updatedAt']);
+      allow delete: if isValidUsername(username) && isSignedIn() &&
+        isOrgSuperOrAdmin(existing().organizationId);
     }
 
     // =========================================================================
@@ -785,17 +873,17 @@ service cloud.firestore {
       allow get: if isValidPublicKey(publicSlugKey) && (
         (existing().isPublished == true && existing().isActive == true) ||
         isBootstrapSuperAdmin() ||
-        (isVerifiedUser() && existing().orgOwnerId == request.auth.uid)
+        (isSignedIn() && existing().orgOwnerId == request.auth.uid)
       );
       allow list: if false;
-      allow create: if isValidPublicKey(publicSlugKey) && isVerifiedUser() &&
+      allow create: if isValidPublicKey(publicSlugKey) && isSignedIn() &&
         isValidPublicFormProjection(incoming()) &&
         incoming().publicSlugKey == publicSlugKey &&
         incoming().updatedAt == request.time && (
           isOrgSuperOrAdmin(incoming().organizationId) ||
           isBuManagerFor(incoming().organizationId, incoming().businessUnitId)
         );
-      allow update: if isValidPublicKey(publicSlugKey) && isVerifiedUser() &&
+      allow update: if isValidPublicKey(publicSlugKey) && isSignedIn() &&
         isValidPublicFormProjection(incoming()) &&
         incoming().publicSlugKey == existing().publicSlugKey &&
         incoming().organizationId == existing().organizationId &&
@@ -804,7 +892,7 @@ service cloud.firestore {
           isOrgSuperOrAdmin(existing().organizationId) ||
           isBuManagerFor(existing().organizationId, existing().businessUnitId)
         );
-      allow delete: if isValidPublicKey(publicSlugKey) && isVerifiedUser() && (
+      allow delete: if isValidPublicKey(publicSlugKey) && isSignedIn() && (
         isOrgSuperOrAdmin(existing().organizationId) ||
         isBuManagerFor(existing().organizationId, existing().businessUnitId)
       );
@@ -817,12 +905,12 @@ service cloud.firestore {
     match /publicSupport/{organizationId} {
       allow get: if isValidId(organizationId);
       allow list: if false;
-      allow create: if isValidId(organizationId) && isVerifiedUser() &&
+      allow create: if isValidId(organizationId) && isSignedIn() &&
         isValidPublicSupportConfig(incoming()) &&
         incoming().organizationId == organizationId &&
         incoming().updatedAt == request.time &&
         isOrgSuperOrAdmin(organizationId);
-      allow update: if isValidId(organizationId) && isVerifiedUser() &&
+      allow update: if isValidId(organizationId) && isSignedIn() &&
         isValidPublicSupportConfig(incoming()) &&
         incoming().organizationId == existing().organizationId &&
         incoming().orgOwnerId == existing().orgOwnerId &&
@@ -837,13 +925,13 @@ service cloud.firestore {
         existing().isActive == true || canReadOrgRecord(existing())
       );
       allow list: if existing().isActive == true || (isSignedIn() && canReadOrgRecord(existing()));
-      allow create: if isValidId(courseId) && isVerifiedUser() &&
+      allow create: if isValidId(courseId) && isSignedIn() &&
         isValidTrainingCourse(incoming()) &&
         incoming().id == courseId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         isOrgSuperOrAdmin(incoming().organizationId);
-      allow update: if isValidId(courseId) && isVerifiedUser() &&
+      allow update: if isValidId(courseId) && isSignedIn() &&
         isValidTrainingCourse(incoming()) &&
         incoming().id == existing().id &&
         incoming().organizationId == existing().organizationId &&
@@ -852,7 +940,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         isOrgSuperOrAdmin(existing().organizationId) &&
         incoming().diff(existing()).affectedKeys().hasOnly(['title', 'category', 'description', 'learningObjectives', 'qualifications', 'duration', 'deliveryMethods', 'schedules', 'availableBatches', 'certificateInfo', 'approvedFee', 'registrationProcedure', 'isActive', 'authorizedUserIds', 'updatedAt']);
-      allow delete: if isValidId(courseId) && isVerifiedUser() &&
+      allow delete: if isValidId(courseId) && isSignedIn() &&
         isOrgSuperOrAdmin(existing().organizationId);
     }
 
@@ -861,13 +949,13 @@ service cloud.firestore {
         existing().isActive == true || canReadOrgRecord(existing())
       );
       allow list: if existing().isActive == true || (isSignedIn() && canReadOrgRecord(existing()));
-      allow create: if isValidId(faqId) && isVerifiedUser() &&
+      allow create: if isValidId(faqId) && isSignedIn() &&
         isValidSupportKnowledge(incoming()) &&
         incoming().id == faqId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         isOrgSuperOrAdmin(incoming().organizationId);
-      allow update: if isValidId(faqId) && isVerifiedUser() &&
+      allow update: if isValidId(faqId) && isSignedIn() &&
         isValidSupportKnowledge(incoming()) &&
         incoming().id == existing().id &&
         incoming().organizationId == existing().organizationId &&
@@ -876,7 +964,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time &&
         isOrgSuperOrAdmin(existing().organizationId) &&
         incoming().diff(existing()).affectedKeys().hasOnly(['category', 'question', 'answer', 'language', 'isActive', 'authorizedUserIds', 'updatedAt']);
-      allow delete: if isValidId(faqId) && isVerifiedUser() &&
+      allow delete: if isValidId(faqId) && isSignedIn() &&
         isOrgSuperOrAdmin(existing().organizationId);
     }
 
@@ -885,7 +973,7 @@ service cloud.firestore {
     // =========================================================================
 
     match /organizations/{organizationId} {
-      allow get: if isValidId(organizationId) && canReadOrgRecord(existing());
+      allow get: if isValidId(organizationId) && (canReadOrgRecord(existing()) || isMemberActive(organizationId));
       allow list: if isSignedIn() && canReadOrgRecord(existing());
       allow create: if isValidId(organizationId) && isVerifiedUser() &&
         isValidOrganization(incoming()) &&
@@ -894,7 +982,7 @@ service cloud.firestore {
         request.auth.uid in incoming().authorizedUserIds &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
-      allow update: if isValidId(organizationId) && isVerifiedUser() &&
+      allow update: if isValidId(organizationId) && isSignedIn() &&
         isValidOrganization(incoming()) &&
         incoming().id == existing().id &&
         incoming().ownerId == existing().ownerId &&
@@ -912,7 +1000,7 @@ service cloud.firestore {
           request.auth.uid == userId || canReadOrgRecord(existing())
         );
         allow list: if isSignedIn() && canReadOrgRecord(existing());
-        allow create: if isValidId(organizationId) && isValidId(userId) && isVerifiedUser() &&
+        allow create: if isValidId(organizationId) && isValidId(userId) && isSignedIn() &&
           isValidOrgMember(incoming()) &&
           incoming().organizationId == organizationId &&
           incoming().userId == userId &&
@@ -920,23 +1008,52 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           existsAfter(/databases/$(database)/documents/organizations/$(organizationId)) && (
             isOrgSuperOrAdmin(organizationId) || (
+              isVerifiedUser() &&
               request.auth.uid == userId &&
               incoming().role == 'super_admin' &&
               getAfter(/databases/$(database)/documents/organizations/$(organizationId)).data.ownerId == request.auth.uid
             )
           );
-        allow update: if isValidId(organizationId) && isValidId(userId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(userId) && isSignedIn() &&
           isValidOrgMember(incoming()) &&
           incoming().organizationId == existing().organizationId &&
           incoming().userId == existing().userId &&
           incoming().ownerId == existing().ownerId &&
           incoming().createdAt == existing().createdAt &&
-          incoming().updatedAt == request.time &&
-          isOrgSuperOrAdmin(organizationId) &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'role', 'crmAccess', 'assignedBusinessUnitIds', 'status', 'authorizedUserIds', 'updatedAt']);
-        allow delete: if isValidId(organizationId) && isValidId(userId) && isVerifiedUser() &&
+          incoming().updatedAt == request.time && (
+            (
+              isOrgSuperOrAdmin(organizationId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'username', 'phone', 'role', 'crmAccess', 'permissions', 'mustChangePassword', 'lastLoginAt', 'assignedBusinessUnitIds', 'status', 'authorizedUserIds', 'updatedAt'])
+            ) || (
+              request.auth.uid == userId &&
+              isMemberActive(organizationId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'phone', 'mustChangePassword', 'lastLoginAt', 'updatedAt'])
+            )
+          );
+        allow delete: if isValidId(organizationId) && isValidId(userId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId) &&
           userId != request.auth.uid;
+      }
+
+      // -----------------------------------------------------------------------
+      // LOGIN ACTIVITY & SECURITY AUDIT LOG (IMMUTABLE APPEND-ONLY)
+      // -----------------------------------------------------------------------
+      match /loginActivity/{eventId} {
+        allow get: if isValidId(organizationId) && isValidId(eventId) && isSignedIn() && (
+          canReadOrgRecord(existing()) || existing().userId == request.auth.uid
+        );
+        allow list: if isSignedIn() && (
+          canReadOrgRecord(existing()) || existing().userId == request.auth.uid
+        );
+        allow create: if isValidId(organizationId) && isValidId(eventId) && isSignedIn() &&
+          isValidLoginActivity(incoming()) &&
+          incoming().id == eventId &&
+          incoming().organizationId == organizationId &&
+          incoming().userId == request.auth.uid &&
+          incoming().createdAt == request.time && (
+            isBootstrapSuperAdmin() || hasMemberDoc(organizationId)
+          );
+        allow update, delete: if false;
       }
 
       // -----------------------------------------------------------------------
@@ -945,7 +1062,7 @@ service cloud.firestore {
       match /businessUnits/{businessUnitId} {
         allow get: if isValidId(organizationId) && isValidId(businessUnitId) && canReadOrgRecord(existing());
         allow list: if isSignedIn() && canReadOrgRecord(existing());
-        allow create: if isValidId(organizationId) && isValidId(businessUnitId) && isVerifiedUser() &&
+        allow create: if isValidId(organizationId) && isValidId(businessUnitId) && isSignedIn() &&
           isValidBusinessUnit(incoming()) &&
           incoming().id == businessUnitId &&
           incoming().organizationId == organizationId &&
@@ -953,7 +1070,7 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           exists(/databases/$(database)/documents/organizations/$(organizationId)) &&
           isOrgSuperOrAdmin(organizationId);
-        allow update: if isValidId(organizationId) && isValidId(businessUnitId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(businessUnitId) && isSignedIn() &&
           isValidBusinessUnit(incoming()) &&
           incoming().id == existing().id &&
           incoming().organizationId == existing().organizationId &&
@@ -963,7 +1080,7 @@ service cloud.firestore {
             (isOrgSuperOrAdmin(organizationId) && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'slug', 'description', 'category', 'services', 'logoUrl', 'brandColor', 'contactEmail', 'phoneNumber', 'physicalAddress', 'website', 'assignedAdminIds', 'assignedStaffIds', 'status', 'authorizedUserIds', 'updatedAt'])) ||
             (isBuManagerFor(organizationId, businessUnitId) && incoming().diff(existing()).affectedKeys().hasOnly(['description', 'services', 'logoUrl', 'brandColor', 'contactEmail', 'phoneNumber', 'physicalAddress', 'website', 'assignedStaffIds', 'updatedAt']))
           );
-        allow delete: if isValidId(organizationId) && isValidId(businessUnitId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(businessUnitId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
 
         // ---------------------------------------------------------------------
@@ -972,7 +1089,7 @@ service cloud.firestore {
         match /forms/{formId} {
           allow get: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && canReadOrgRecord(existing());
           allow list: if isSignedIn() && canReadOrgRecord(existing());
-          allow create: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isVerifiedUser() &&
+          allow create: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isSignedIn() &&
             isValidDynamicForm(incoming()) &&
             incoming().id == formId &&
             incoming().organizationId == organizationId &&
@@ -983,7 +1100,7 @@ service cloud.firestore {
               isOrgSuperOrAdmin(organizationId) ||
               isBuManagerFor(organizationId, businessUnitId)
             );
-          allow update: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isVerifiedUser() &&
+          allow update: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isSignedIn() &&
             isValidDynamicForm(incoming()) &&
             incoming().id == existing().id &&
             incoming().organizationId == existing().organizationId &&
@@ -995,7 +1112,7 @@ service cloud.firestore {
               isBuManagerFor(organizationId, businessUnitId)
             ) &&
             incoming().diff(existing()).affectedKeys().hasOnly(['title', 'slug', 'publicSlugKey', 'businessUnitName', 'description', 'fields', 'isPublished', 'isActive', 'submissionLimit', 'submissionCount', 'confirmationMessage', 'brandColor', 'logoUrl', 'aiPrompt', 'authorizedUserIds', 'updatedAt']);
-          allow delete: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isVerifiedUser() && (
+          allow delete: if isValidId(organizationId) && isValidId(businessUnitId) && isValidId(formId) && isSignedIn() && (
             isOrgSuperOrAdmin(organizationId) ||
             isBuManagerFor(organizationId, businessUnitId)
           );
@@ -1020,11 +1137,11 @@ service cloud.firestore {
               incoming().authorizedUserIds.size() == 1 &&
               incoming().authorizedUserIds[0] == incoming().ownerId
             ) || (
-              isVerifiedUser() && isStaffForOrg(organizationId)
+              isSignedIn() && isStaffForOrg(organizationId)
             )
           );
         allow update: if false;
-        allow delete: if isValidId(organizationId) && isValidId(submissionId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(submissionId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
       }
 
@@ -1064,10 +1181,10 @@ service cloud.firestore {
               incoming().authorizedUserIds[0] == incoming().ownerId &&
               existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/supportConversations/$(incoming().submissionId))
             ) || (
-              isVerifiedUser() && isStaffForOrg(organizationId)
+              isSignedIn() && isStaffForOrg(organizationId)
             )
           );
-        allow update: if isValidId(organizationId) && isValidId(leadId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(leadId) && isSignedIn() &&
           isValidLead(incoming()) &&
           incoming().id == existing().id &&
           incoming().leadRef == existing().leadRef &&
@@ -1089,7 +1206,7 @@ service cloud.firestore {
               incoming().diff(existing()).affectedKeys().hasOnly(['status', 'priority', 'followUpDate', 'lastContactAt', 'internalNotes', 'attachments', 'updatedAt'])
             )
           );
-        allow delete: if isValidId(organizationId) && isValidId(leadId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(leadId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
 
         // ---------------------------------------------------------------------
@@ -1110,7 +1227,7 @@ service cloud.firestore {
                 !exists(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId)) &&
                 existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId))
               ) || (
-                isVerifiedUser() &&
+                isSignedIn() &&
                 isStaffForOrg(organizationId) &&
                 incoming().actorId == request.auth.uid &&
                 existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(leadId))
@@ -1125,7 +1242,7 @@ service cloud.firestore {
         match /communications/{communicationId} {
           allow get: if isValidId(organizationId) && isValidId(leadId) && isValidId(communicationId) && canReadOrgRecord(existing());
           allow list: if isSignedIn() && canReadOrgRecord(existing());
-          allow create: if isValidId(organizationId) && isValidId(leadId) && isValidId(communicationId) && isVerifiedUser() &&
+          allow create: if isValidId(organizationId) && isValidId(leadId) && isValidId(communicationId) && isSignedIn() &&
             isValidCommunication(incoming()) &&
             incoming().id == communicationId &&
             incoming().organizationId == organizationId &&
@@ -1144,14 +1261,14 @@ service cloud.firestore {
       match /messageTemplates/{templateId} {
         allow get: if isValidId(organizationId) && isValidId(templateId) && canReadOrgRecord(existing());
         allow list: if isSignedIn() && canReadOrgRecord(existing());
-        allow create: if isValidId(organizationId) && isValidId(templateId) && isVerifiedUser() &&
+        allow create: if isValidId(organizationId) && isValidId(templateId) && isSignedIn() &&
           isValidMessageTemplate(incoming()) &&
           incoming().id == templateId &&
           incoming().organizationId == organizationId &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
           isStaffForOrg(organizationId);
-        allow update: if isValidId(organizationId) && isValidId(templateId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(templateId) && isSignedIn() &&
           isValidMessageTemplate(incoming()) &&
           incoming().id == existing().id &&
           incoming().organizationId == existing().organizationId &&
@@ -1160,7 +1277,7 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           isStaffForOrg(organizationId) &&
           incoming().diff(existing()).affectedKeys().hasOnly(['businessUnitId', 'name', 'channel', 'subject', 'body', 'authorizedUserIds', 'updatedAt']);
-        allow delete: if isValidId(organizationId) && isValidId(templateId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(templateId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
       }
 
@@ -1170,7 +1287,7 @@ service cloud.firestore {
       match /staffAssignments/{assignmentId} {
         allow get: if isValidId(organizationId) && isValidId(assignmentId) && canReadOrgRecord(existing());
         allow list: if isSignedIn() && canReadOrgRecord(existing());
-        allow create: if isValidId(organizationId) && isValidId(assignmentId) && isVerifiedUser() &&
+        allow create: if isValidId(organizationId) && isValidId(assignmentId) && isSignedIn() &&
           isValidStaffAssignment(incoming()) &&
           incoming().id == assignmentId &&
           incoming().organizationId == organizationId &&
@@ -1178,7 +1295,7 @@ service cloud.firestore {
           exists(/databases/$(database)/documents/organizations/$(organizationId)/businessUnits/$(incoming().businessUnitId)) &&
           isOrgSuperOrAdmin(organizationId);
         allow update: if false;
-        allow delete: if isValidId(organizationId) && isValidId(assignmentId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(assignmentId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
       }
 
@@ -1204,10 +1321,10 @@ service cloud.firestore {
               !exists(/databases/$(database)/documents/organizations/$(organizationId)/supportConversations/$(incoming().entityId)) &&
               existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/supportConversations/$(incoming().entityId))
             ) || (
-              isVerifiedUser() && isStaffForOrg(organizationId)
+              isSignedIn() && isStaffForOrg(organizationId)
             )
           );
-        allow update: if isValidId(organizationId) && isValidId(notificationId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(notificationId) && isSignedIn() &&
           isValidNotification(incoming()) &&
           incoming().id == existing().id &&
           incoming().organizationId == existing().organizationId &&
@@ -1215,7 +1332,7 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           (existing().recipientUserId == request.auth.uid || isOrgSuperOrAdmin(organizationId)) &&
           incoming().diff(existing()).affectedKeys().hasOnly(['isRead']);
-        allow delete: if isValidId(organizationId) && isValidId(notificationId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(notificationId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
       }
 
@@ -1225,7 +1342,7 @@ service cloud.firestore {
       match /auditLogs/{logId} {
         allow get: if isValidId(organizationId) && isValidId(logId) && canReadOrgRecord(existing());
         allow list: if isSignedIn() && canReadOrgRecord(existing());
-        allow create: if isValidId(organizationId) && isValidId(logId) && isVerifiedUser() &&
+        allow create: if isValidId(organizationId) && isValidId(logId) && isSignedIn() &&
           isValidAuditLog(incoming()) &&
           incoming().id == logId &&
           incoming().organizationId == organizationId &&
@@ -1241,13 +1358,13 @@ service cloud.firestore {
       match /integrations/{integrationId} {
         allow get: if isValidId(organizationId) && isValidId(integrationId) && canReadOrgRecord(existing());
         allow list: if isSignedIn() && canReadOrgRecord(existing());
-        allow create: if isValidId(organizationId) && isValidId(integrationId) && isVerifiedUser() &&
+        allow create: if isValidId(organizationId) && isValidId(integrationId) && isSignedIn() &&
           isValidIntegrationConfig(incoming()) &&
           incoming().id == integrationId &&
           incoming().organizationId == organizationId &&
           incoming().updatedAt == request.time &&
           isOrgSuperOrAdmin(organizationId);
-        allow update: if isValidId(organizationId) && isValidId(integrationId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(integrationId) && isSignedIn() &&
           isValidIntegrationConfig(incoming()) &&
           incoming().id == existing().id &&
           incoming().organizationId == existing().organizationId &&
@@ -1265,11 +1382,11 @@ service cloud.firestore {
       match /supportConversations/{conversationId} {
         allow get: if isValidId(organizationId) && isValidId(conversationId) && (
           canReadOrgRecord(existing()) ||
-          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+          (isSignedIn() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
         );
         allow list: if isSignedIn() && (
           canReadOrgRecord(existing()) ||
-          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+          (existing().studentUid != '' && existing().studentUid == request.auth.uid)
         );
         allow create: if isValidId(organizationId) && isValidId(conversationId) &&
           isValidSupportConversation(incoming()) &&
@@ -1285,12 +1402,12 @@ service cloud.firestore {
               incoming().assignedAgentId == '' &&
               incoming().assignedAgentName == '' &&
               incoming().status in ['active', 'escalated'] &&
-              (incoming().studentUid == '' || (isVerifiedUser() && incoming().studentUid == request.auth.uid))
+              (incoming().studentUid == '' || (isSignedIn() && incoming().studentUid == request.auth.uid))
             ) || (
-              isVerifiedUser() && isStaffForOrg(organizationId)
+              isSignedIn() && isStaffForOrg(organizationId)
             )
           );
-        allow update: if isValidId(organizationId) && isValidId(conversationId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(conversationId) && isSignedIn() &&
           isValidSupportConversation(incoming()) &&
           incoming().id == existing().id &&
           incoming().organizationId == existing().organizationId &&
@@ -1308,7 +1425,7 @@ service cloud.firestore {
               incoming().diff(existing()).affectedKeys().hasOnly(['messages', 'summary', 'intent', 'interestedCourse', 'unansweredQuestions', 'status', 'updatedAt'])
             )
           );
-        allow delete: if isValidId(organizationId) && isValidId(conversationId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(conversationId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
       }
 
@@ -1318,11 +1435,11 @@ service cloud.firestore {
       match /studentRegistrations/{registrationId} {
         allow get: if isValidId(organizationId) && isValidId(registrationId) && (
           canReadOrgRecord(existing()) ||
-          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+          (isSignedIn() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
         );
         allow list: if isSignedIn() && (
           canReadOrgRecord(existing()) ||
-          (isVerifiedUser() && existing().studentUid != '' && existing().studentUid == request.auth.uid)
+          (existing().studentUid != '' && existing().studentUid == request.auth.uid)
         );
         allow create: if isValidId(organizationId) && isValidId(registrationId) &&
           isValidStudentRegistration(incoming()) &&
@@ -1339,13 +1456,13 @@ service cloud.firestore {
               incoming().ownerId == publicSupportOwner(organizationId) &&
               incoming().authorizedUserIds.size() == 1 &&
               incoming().authorizedUserIds[0] == incoming().ownerId &&
-              (incoming().studentUid == '' || (isVerifiedUser() && incoming().studentUid == request.auth.uid)) &&
+              (incoming().studentUid == '' || (isSignedIn() && incoming().studentUid == request.auth.uid)) &&
               existsAfter(/databases/$(database)/documents/organizations/$(organizationId)/leads/$(incoming().leadId))
             ) || (
-              isVerifiedUser() && isStaffForOrg(organizationId)
+              isSignedIn() && isStaffForOrg(organizationId)
             )
           );
-        allow update: if isValidId(organizationId) && isValidId(registrationId) && isVerifiedUser() &&
+        allow update: if isValidId(organizationId) && isValidId(registrationId) && isSignedIn() &&
           isValidStudentRegistration(incoming()) &&
           incoming().id == existing().id &&
           incoming().organizationId == existing().organizationId &&
@@ -1356,7 +1473,7 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           isStaffForOrg(organizationId) &&
           incoming().diff(existing()).affectedKeys().hasOnly(['registrationStatus', 'batchName', 'classSchedule', 'trainingLocation', 'paymentStatus', 'certificateStatus', 'documentUploadFormUrl', 'authorizedUserIds', 'updatedAt']);
-        allow delete: if isValidId(organizationId) && isValidId(registrationId) && isVerifiedUser() &&
+        allow delete: if isValidId(organizationId) && isValidId(registrationId) && isSignedIn() &&
           isOrgSuperOrAdmin(organizationId);
       }
     }

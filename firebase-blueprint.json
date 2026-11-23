@@ -9,8 +9,14 @@
         "email": { "type": "string", "format": "email", "maxLength": 200 },
         "displayName": { "type": "string", "maxLength": 120 },
         "photoURL": { "type": "string", "maxLength": 500 },
+        "username": { "type": "string", "maxLength": 60 },
+        "phone": { "type": "string", "maxLength": 60 },
+        "authProvider": { "type": "string", "enum": ["google", "username_password"] },
+        "mustChangePassword": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "inactive", "suspended"] },
+        "lastLoginAt": { "type": "string", "maxLength": 50 },
         "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
-        "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor"] },
+        "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor", "student"] },
         "crmAccess": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -43,11 +49,17 @@
         "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "username": { "type": "string", "maxLength": 60 },
+        "phone": { "type": "string", "maxLength": 60 },
         "displayName": { "type": "string", "maxLength": 120 },
-        "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor"] },
+        "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor", "student"] },
         "crmAccess": { "type": "boolean" },
+        "permissions": { "type": "object" },
+        "authProvider": { "type": "string", "enum": ["google", "username_password"] },
+        "mustChangePassword": { "type": "boolean" },
+        "lastLoginAt": { "type": "string", "maxLength": 50 },
         "assignedBusinessUnitIds": { "type": "array" },
-        "status": { "type": "string", "enum": ["active", "inactive", "invited"] },
+        "status": { "type": "string", "enum": ["active", "inactive", "invited", "suspended"] },
         "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "authorizedUserIds": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -572,12 +584,54 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "companyName", "contactName", "email", "phone", "industry", "branchCount", "interestedPlan", "message", "status", "createdAt"]
+    },
+    "UsernameLookup": {
+      "title": "UsernameLookup",
+      "description": "Publicly resolvable single-document lookup mapping an admin-assigned username to its Firebase login email and tenant (contains zero password hashes or secrets).",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "minLength": 3, "maxLength": 60, "pattern": "^[a-z0-9._\\-]+$" },
+        "loginEmail": { "type": "string", "maxLength": 200 },
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["active", "inactive", "suspended"] },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["username", "loginEmail", "uid", "organizationId", "status", "ownerId", "authorizedUserIds", "updatedAt"]
+    },
+    "LoginActivityRecord": {
+      "title": "LoginActivityRecord",
+      "description": "Immutable authentication audit event for sign-ins, sign-outs, and password updates per tenant.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "maxLength": 60 },
+        "email": { "type": "string", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor", "student"] },
+        "authMethod": { "type": "string", "enum": ["google", "username_password"] },
+        "eventType": { "type": "string", "enum": ["login", "logout", "password_change", "password_reset_requested"] },
+        "userAgent": { "type": "string", "maxLength": 260 },
+        "domain": { "type": "string", "maxLength": 160 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorizedUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "organizationId", "userId", "username", "email", "displayName", "role", "authMethod", "eventType", "userAgent", "domain", "ownerId", "authorizedUserIds", "createdAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "User profile and default organization reference (PII isolated to owner or Super Admin)."
+      "description": "User profile and default organization reference (PII isolated to owner, Tenant Admin, or Super Admin)."
+    },
+    "/usernameLookup/{username}": {
+      "schema": { "$ref": "#/entities/UsernameLookup" },
+      "description": "Exact-key username-to-loginEmail lookup for admin-created username/password accounts (no enumeration allowed)."
     },
     "/saasPlans/{planId}": {
       "schema": { "$ref": "#/entities/SaasPlan" },
@@ -670,6 +724,10 @@
     "/organizations/{organizationId}/studentRegistrations/{registrationId}": {
       "schema": { "$ref": "#/entities/StudentRegistration" },
       "description": "Conversational AI and portal student registration records with strict per-student privacy."
+    },
+    "/organizations/{organizationId}/loginActivity/{eventId}": {
+      "schema": { "$ref": "#/entities/LoginActivityRecord" },
+      "description": "Immutable per-tenant authentication and login activity audit log."
     }
   }
 }

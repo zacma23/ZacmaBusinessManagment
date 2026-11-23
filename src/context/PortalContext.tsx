@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   onAuthStateChanged,
   signInWithPopup,
@@ -25,6 +25,13 @@ import {
   detectDuplicateLeads,
   timestampToMillis,
 } from '../lib/zacmaService';
+import {
+  changeAuthenticatedUserPassword,
+  computeSubscriptionPolicy,
+  logLoginActivity,
+  loginWithUsernameAndPassword,
+  resolveEffectivePermissions,
+} from '../lib/authService';
 import type {
   AppNotification,
   AuditLog,
@@ -33,6 +40,8 @@ import type {
   FormSubmission,
   IntegrationConfig,
   Lead,
+  LoginActivityRecord,
+  MemberPermissions,
   MessageTemplate,
   Organization,
   OrganizationMember,
@@ -42,6 +51,7 @@ import type {
   SaasSalesInquiry,
   SaasTenantSubscription,
   StudentRegistration,
+  SubscriptionPolicy,
   SupportConversation,
   SupportKnowledgeItem,
   TrainingCourse,
@@ -60,6 +70,9 @@ import {
   switchActiveOrganization,
 } from '../lib/saasService';
 
+const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes inactivity auto-logout
+const IDLE_WARNING_MS = 2 * 60 * 1000; // Show 2-minute countdown warning before logout
+
 interface PortalContextValue {
   user: User | null;
   authLoading: boolean;
@@ -70,9 +83,17 @@ interface PortalContextValue {
   currentMember: OrganizationMember | null;
   effectiveRole: UserRole;
   effectiveCrmAccess: boolean;
+  effectivePermissions: MemberPermissions;
   isSuperAdmin: boolean;
   isPlatformOwner: boolean;
+  isStudent: boolean;
+  mustChangePassword: boolean;
+  accountBlockedReason: 'inactive' | 'suspended' | null;
+  subscriptionPolicy: SubscriptionPolicy;
+  sessionWarningSeconds: number | null;
+  extendSession: () => void;
   members: OrganizationMember[];
+  loginActivity: LoginActivityRecord[];
   businessUnits: BusinessUnit[];
   forms: DynamicForm[];
   submissions: FormSubmission[];
@@ -93,6 +114,8 @@ interface PortalContextValue {
   saasInvoices: SaasInvoice[];
   saasSalesInquiries: SaasSalesInquiry[];
   signInWithGoogle: () => Promise<void>;
+  signInWithUsername: (identifier: string, password: string) => Promise<void>;
+  changeCurrentUserPassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   markNotificationRead: (notificationId: string) => Promise<void>;
   switchOrganization: (targetOrgId: string) => Promise<void>;
@@ -109,6 +132,8 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
   const [organization, setOrganization] = useState<Organization | null>(null);
   const [myOrganizations, setMyOrganizations] = useState<Organization[]>([]);
   const [members, setMembers] = useState<OrganizationMember[]>([]);
+  const [ownMemberDoc, setOwnMemberDoc] = useState<OrganizationMember | null>(null);
+  const [loginActivity, setLoginActivity] = useState<LoginActivityRecord[]>([]);
   const [businessUnits, setBusinessUnits] = useState<BusinessUnit[]>([]);
   const [formsByUnit, setFormsByUnit] = useState<Record<string, DynamicForm[]>>({});
   const [submissions, setSubmissions] = useState<FormSubmission[]>([]);
@@ -133,6 +158,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
   const [saasInvoices, setSaasInvoices] = useState<SaasInvoice[]>([]);
   const [saasSalesInquiries, setSaasSalesInquiries] = useState<SaasSalesInquiry[]>([]);
 
+  // Inactivity session guard
+  const lastActivityAtRef = useRef<number>(Date.now());
+  const loggedSessionUidRef = useRef<string | null>(null);
+  const [sessionWarningSeconds, setSessionWarningSeconds] = useState<number | null>(null);
+
   const isBootstrapSuper = Boolean(
     user?.email &&
       user.emailVerified &&
@@ -144,10 +174,14 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
       if (!firebaseUser) {
+        loggedSessionUidRef.current = null;
+        setSessionWarningSeconds(null);
         setProfile(null);
         setOrganization(null);
         setMyOrganizations([]);
         setMembers([]);
+        setOwnMemberDoc(null);
+        setLoginActivity([]);
         setBusinessUnits([]);
         setFormsByUnit({});
         setSubmissions([]);
@@ -169,6 +203,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      lastActivityAtRef.current = Date.now();
       setDataLoading(true);
       try {
         const userRef = doc(db, `users/${firebaseUser.uid}`);
@@ -178,16 +213,27 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           Boolean(firebaseUser.emailVerified) &&
           firebaseUser.email?.toLowerCase() === BOOTSTRAP_SUPER_ADMIN_EMAIL.toLowerCase();
 
+        const isPasswordProvider = firebaseUser.providerData?.some(
+          (p) => p.providerId === 'password'
+        );
+
         let orgId = DEFAULT_ORG_ID;
+        const nowIso = new Date().toISOString();
 
         if (!userSnap.exists()) {
           const initialRole: UserRole = isBootstrap ? 'super_admin' : 'staff';
           const initialCrmAccess = isBootstrap;
-          const newProfile = {
+          const newProfile: UserProfile = {
             uid: firebaseUser.uid,
             email: firebaseUser.email || '',
             displayName: firebaseUser.displayName || firebaseUser.email || 'Zacma User',
             photoURL: firebaseUser.photoURL || '',
+            username: '',
+            phone: '',
+            authProvider: isPasswordProvider ? 'username_password' : 'google',
+            mustChangePassword: false,
+            status: 'active',
+            lastLoginAt: nowIso,
             organizationId: orgId,
             role: initialRole,
             crmAccess: initialCrmAccess,
@@ -200,6 +246,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           const existingProfile = userSnap.data() as UserProfile;
           orgId = existingProfile.organizationId || DEFAULT_ORG_ID;
           setProfile(existingProfile);
+          // Stamp lastLoginAt cleanly
+          await updateDoc(userRef, {
+            lastLoginAt: nowIso,
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
         }
 
         // If bootstrapped Super Admin (Platform Owner), ensure root organization, plans, and 18 institute courses exist
@@ -226,9 +277,14 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               userId: firebaseUser.uid,
               organizationId: DEFAULT_ORG_ID,
               email: firebaseUser.email || BOOTSTRAP_SUPER_ADMIN_EMAIL,
+              username: 'superadmin',
+              phone: '',
               displayName: firebaseUser.displayName || 'Zacma Super Admin',
               role: 'super_admin',
               crmAccess: true,
+              authProvider: 'google',
+              mustChangePassword: false,
+              lastLoginAt: nowIso,
               assignedBusinessUnitIds: [],
               status: 'active',
               ownerId: firebaseUser.uid,
@@ -243,7 +299,8 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
                 organizationId: DEFAULT_ORG_ID,
                 providerKey: 'gemini_ai',
                 displayName: 'Google Gemini AI (Configured)',
-                purpose: 'Powers the AI Form Generator and permission-scoped Zacma AI Assistant via server-side API.',
+                purpose:
+                  'Powers the AI Form Generator and permission-scoped Zacma AI Assistant via server-side API.',
                 requiredCredentials: ['GEMINI_API_KEY (Injected server-side)'],
                 estimatedCost: 'Existing AI Studio / Gemini API allocation',
                 approvalStatus: 'enabled',
@@ -256,7 +313,8 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
                 organizationId: DEFAULT_ORG_ID,
                 providerKey: 'resend_email',
                 displayName: 'Resend Transactional & Bulk Email',
-                purpose: 'Delivers individual and bulk personalized emails from the CRM Communication Center.',
+                purpose:
+                  'Delivers individual and bulk personalized emails from the CRM Communication Center.',
                 requiredCredentials: ['RESEND_API_KEY', 'RESEND_FROM_EMAIL'],
                 estimatedCost: 'Free tier up to 3,000 emails/mo; Pro starts at $20/mo',
                 approvalStatus: 'pending_approval',
@@ -269,8 +327,13 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
                 organizationId: DEFAULT_ORG_ID,
                 providerKey: 'twilio_sms',
                 displayName: 'Twilio / AfroMessage Programmable SMS',
-                purpose: 'Sends individual and bulk SMS messages and follow-up reminders to CRM leads.',
-                requiredCredentials: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER'],
+                purpose:
+                  'Sends individual and bulk SMS messages and follow-up reminders to CRM leads.',
+                requiredCredentials: [
+                  'TWILIO_ACCOUNT_SID',
+                  'TWILIO_AUTH_TOKEN',
+                  'TWILIO_FROM_NUMBER',
+                ],
                 estimatedCost: 'Pay-as-you-go (~$0.0079/SMS US; regional carrier rates apply)',
                 approvalStatus: 'pending_approval',
                 approvedBy: '',
@@ -284,7 +347,8 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
                 displayName: 'WhatsApp Business Cloud API',
                 purpose: 'Enables verified business messaging and lead follow-ups over WhatsApp.',
                 requiredCredentials: ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'],
-                estimatedCost: 'Meta per-conversation pricing after 1,000 free service conversations/mo',
+                estimatedCost:
+                  'Meta per-conversation pricing after 1,000 free service conversations/mo',
                 approvalStatus: 'pending_approval',
                 approvedBy: '',
                 ownerId: firebaseUser.uid,
@@ -360,7 +424,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => unsub();
   }, []);
 
-  // 1b. Live UserProfile listener so workspace switches & new tenant provisioning update immediately
+  // 1b. Live UserProfile listener so workspace switches & role updates reflect immediately
   useEffect(() => {
     if (!user) return;
     const unsub = onSnapshot(
@@ -377,12 +441,29 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => unsub();
   }, [user]);
 
-  // 1c. Global SaaS Plans, Owned Organizations, Tenant Subscriptions, Invoices & Sales Inquiries listeners
+  const orgId = profile?.organizationId || DEFAULT_ORG_ID;
+  const isStudentProfile = !isBootstrapSuper && profile?.role === 'student';
+
+  // 1c. Live Own Member Document listener (works for all roles including students)
   useEffect(() => {
-    if (!user) return;
+    if (!user || !profile) return;
+    const unsub = onSnapshot(
+      doc(db, `organizations/${orgId}/members/${user.uid}`),
+      (snap) => {
+        setOwnMemberDoc(snap.exists() ? (snap.data() as OrganizationMember) : null);
+      },
+      () => {
+        setOwnMemberDoc(null);
+      }
+    );
+    return () => unsub();
+  }, [user, profile?.organizationId, orgId]);
+
+  // 1d. Global SaaS Plans, Owned Organizations, Tenant Subscriptions, Invoices & Sales Inquiries listeners
+  useEffect(() => {
+    if (!user || isStudentProfile) return;
     const unsubs: Array<() => void> = [];
 
-    // Commercial SaaS Plans
     const plansQuery = isBootstrapSuper
       ? collection(db, 'saasPlans')
       : query(collection(db, 'saasPlans'), where('isActive', '==', true));
@@ -401,7 +482,6 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       )
     );
 
-    // Accessible Organizations (enables Multi-Tenant Workspace Switcher)
     const orgsQuery = isBootstrapSuper
       ? collection(db, 'organizations')
       : query(collection(db, 'organizations'), where('authorizedUserIds', 'array-contains', user.uid));
@@ -418,7 +498,6 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       )
     );
 
-    // Tenant Subscriptions
     const tenantsQuery = isBootstrapSuper
       ? collection(db, 'saasTenants')
       : query(collection(db, 'saasTenants'), where('authorizedUserIds', 'array-contains', user.uid));
@@ -435,7 +514,6 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       )
     );
 
-    // SaaS Invoices
     const invoicesQuery = isBootstrapSuper
       ? collection(db, 'saasInvoices')
       : query(collection(db, 'saasInvoices'), where('ownerId', '==', user.uid));
@@ -452,7 +530,6 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       )
     );
 
-    // SaaS Buyer Inquiries (Platform Owner only)
     if (isBootstrapSuper) {
       unsubs.push(
         onSnapshot(
@@ -473,24 +550,15 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, isBootstrapSuper]);
+  }, [user, isBootstrapSuper, isStudentProfile]);
 
-  // 2. Real-time Firestore listeners scoped strictly to the active organization
-  const orgId = profile?.organizationId || DEFAULT_ORG_ID;
-
+  // 2. Real-time Firestore listeners scoped strictly to the active organization & role
   useEffect(() => {
     if (!user || !profile) return;
 
     const unsubs: Array<() => void> = [];
 
-    const makeQuery = (colPath: string) => {
-      const ref = collection(db, colPath);
-      return isBootstrapSuper
-        ? ref
-        : query(ref, where('authorizedUserIds', 'array-contains', user.uid));
-    };
-
-    // Active Organization doc
+    // Active Organization doc (allowed for both active staff and active students)
     unsubs.push(
       onSnapshot(
         doc(db, `organizations/${orgId}`),
@@ -498,11 +566,87 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           setOrganization(snap.exists() ? (snap.data() as Organization) : null);
         },
         (err) => {
-          console.warn('Org read skipped (user may await invite or create workspace):', err.message);
+          console.warn('Org read skipped:', err.message);
           setOrganization(null);
         }
       )
     );
+
+    // Student Role: strictly isolated listeners (only own registrations, own login activity, active public courses)
+    if (isStudentProfile) {
+      setMembers([]);
+      setBusinessUnits([]);
+      setFormsByUnit({});
+      setSubmissions([]);
+      setLeads([]);
+      setTemplates([]);
+      setAuditLogs([]);
+      setIntegrations([]);
+      setNotifications([]);
+      setKnowledgeItems([]);
+      setSupportConversations([]);
+      setCurrentTenantSubscription(null);
+
+      unsubs.push(
+        onSnapshot(
+          query(
+            collection(db, `organizations/${orgId}/studentRegistrations`),
+            where('studentUid', '==', user.uid)
+          ),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => d.data() as StudentRegistration)
+              .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
+            setStudentRegistrations(list);
+          },
+          (err) => console.warn('Student registrations read skipped:', err.message)
+        )
+      );
+
+      unsubs.push(
+        onSnapshot(
+          query(
+            collection(db, 'publicCourses'),
+            where('organizationId', '==', orgId),
+            where('isActive', '==', true)
+          ),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => d.data() as TrainingCourse)
+              .sort((a, b) => a.title.localeCompare(b.title));
+            setCourses(list);
+          },
+          (err) => console.warn('Student courses read skipped:', err.message)
+        )
+      );
+
+      unsubs.push(
+        onSnapshot(
+          query(
+            collection(db, `organizations/${orgId}/loginActivity`),
+            where('userId', '==', user.uid)
+          ),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => d.data() as LoginActivityRecord)
+              .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
+            setLoginActivity(list);
+          },
+          (err) => console.warn('Student login activity skipped:', err.message)
+        )
+      );
+
+      return () => {
+        unsubs.forEach((fn) => fn());
+      };
+    }
+
+    const makeQuery = (colPath: string) => {
+      const ref = collection(db, colPath);
+      return isBootstrapSuper
+        ? ref
+        : query(ref, where('authorizedUserIds', 'array-contains', user.uid));
+    };
 
     // Active Tenant Subscription doc
     unsubs.push(
@@ -527,6 +671,20 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           setMembers(snap.docs.map((d) => d.data() as OrganizationMember));
         },
         (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/members`)
+      )
+    );
+
+    // Login Activity & Security Audit
+    unsubs.push(
+      onSnapshot(
+        makeQuery(`organizations/${orgId}/loginActivity`),
+        (snap) => {
+          const list = snap.docs
+            .map((d) => d.data() as LoginActivityRecord)
+            .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
+          setLoginActivity(list);
+        },
+        (err) => console.warn('Login activity read skipped:', err.message)
       )
     );
 
@@ -711,11 +869,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, profile?.organizationId, orgId, isBootstrapSuper]);
+  }, [user, profile?.organizationId, orgId, isBootstrapSuper, isStudentProfile]);
 
   // 3. Per-Business-Unit dynamic forms listeners
   useEffect(() => {
-    if (!user || !profile || businessUnits.length === 0) {
+    if (!user || !profile || isStudentProfile || businessUnits.length === 0) {
       setFormsByUnit({});
       return;
     }
@@ -745,7 +903,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, profile?.organizationId, orgId, businessUnits, isBootstrapSuper]);
+  }, [user, profile?.organizationId, orgId, businessUnits, isBootstrapSuper, isStudentProfile]);
 
   const forms = useMemo(() => {
     const unitIds = new Set(businessUnits.map((b) => b.id));
@@ -757,6 +915,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
 
   const currentMember = useMemo(() => {
     if (!user) return null;
+    if (ownMemberDoc) return ownMemberDoc;
     return (
       members.find(
         (m) =>
@@ -764,29 +923,151 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           (user.email && m.email.toLowerCase() === user.email.toLowerCase())
       ) || null
     );
-  }, [members, user]);
+  }, [ownMemberDoc, members, user]);
 
   const effectiveRole: UserRole = isBootstrapSuper
     ? 'super_admin'
     : currentMember?.role || profile?.role || 'staff';
 
-  const effectiveCrmAccess = isBootstrapSuper
-    ? true
-    : currentMember
-      ? currentMember.crmAccess ||
-        ['super_admin', 'org_admin', 'bu_manager', 'staff'].includes(currentMember.role)
-      : Boolean(profile?.crmAccess);
+  const effectivePermissions = useMemo(
+    () =>
+      isBootstrapSuper
+        ? resolveEffectivePermissions('super_admin')
+        : resolveEffectivePermissions(
+            effectiveRole,
+            currentMember?.permissions,
+            currentMember?.crmAccess ?? profile?.crmAccess
+          ),
+    [isBootstrapSuper, effectiveRole, currentMember, profile?.crmAccess]
+  );
+
+  const effectiveCrmAccess = effectivePermissions.crm;
+  const isStudent = effectiveRole === 'student';
+
+  const accountBlockedReason: 'inactive' | 'suspended' | null = useMemo(() => {
+    if (isBootstrapSuper) return null;
+    const status = currentMember?.status || profile?.status;
+    if (status === 'suspended') return 'suspended';
+    if (status === 'inactive') return 'inactive';
+    return null;
+  }, [isBootstrapSuper, currentMember?.status, profile?.status]);
+
+  const mustChangePassword = useMemo(() => {
+    if (isBootstrapSuper) return false;
+    return Boolean(currentMember?.mustChangePassword || profile?.mustChangePassword);
+  }, [isBootstrapSuper, currentMember?.mustChangePassword, profile?.mustChangePassword]);
+
+  const subscriptionPolicy = useMemo(
+    () => computeSubscriptionPolicy(currentTenantSubscription, isBootstrapSuper),
+    [currentTenantSubscription, isBootstrapSuper]
+  );
 
   const duplicateLeadMap = useMemo(() => {
     return detectDuplicateLeads(leads, organization?.duplicateMatchMode || 'email_or_phone');
   }, [leads, organization?.duplicateMatchMode]);
 
+  // Record immutable login event once per authenticated session & organization
+  useEffect(() => {
+    if (!user || !organization || !profile || accountBlockedReason) return;
+    const sessionKey = `${user.uid}:${organization.id}`;
+    if (loggedSessionUidRef.current === sessionKey) return;
+    loggedSessionUidRef.current = sessionKey;
+
+    const isPasswordAuth = user.providerData?.some((p) => p.providerId === 'password');
+    void logLoginActivity({
+      organizationId: organization.id,
+      ownerId: organization.ownerId,
+      authorizedUserIds: organization.authorizedUserIds,
+      userId: user.uid,
+      username: currentMember?.username || profile.username || '',
+      email: user.email || profile.email || '',
+      displayName: currentMember?.displayName || profile.displayName || user.displayName || 'User',
+      role: effectiveRole,
+      authMethod: isPasswordAuth ? 'username_password' : 'google',
+      eventType: 'login',
+    });
+
+    // Stamp lastLoginAt on member doc
+    if (currentMember) {
+      void updateDoc(doc(db, `organizations/${organization.id}/members/${user.uid}`), {
+        lastLoginAt: new Date().toISOString(),
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+  }, [user, organization, profile, currentMember, effectiveRole, accountBlockedReason]);
+
+  const logout = useCallback(async () => {
+    if (user && organization && profile) {
+      const isPasswordAuth = user.providerData?.some((p) => p.providerId === 'password');
+      await logLoginActivity({
+        organizationId: organization.id,
+        ownerId: organization.ownerId,
+        authorizedUserIds: organization.authorizedUserIds,
+        userId: user.uid,
+        username: currentMember?.username || profile.username || '',
+        email: user.email || profile.email || '',
+        displayName: currentMember?.displayName || profile.displayName || user.displayName || 'User',
+        role: effectiveRole,
+        authMethod: isPasswordAuth ? 'username_password' : 'google',
+        eventType: 'logout',
+      });
+    }
+    setSessionWarningSeconds(null);
+    await signOut(auth);
+  }, [user, organization, profile, currentMember, effectiveRole]);
+
+  // 4. Session inactivity timeout guard (60 min auto-logout with 2 min warning)
+  const extendSession = useCallback(() => {
+    lastActivityAtRef.current = Date.now();
+    setSessionWarningSeconds(null);
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const touch = () => {
+      lastActivityAtRef.current = Date.now();
+      setSessionWarningSeconds((prev) => (prev !== null ? null : prev));
+    };
+
+    const events: Array<keyof WindowEventMap> = ['mousedown', 'keydown', 'scroll', 'touchstart'];
+    events.forEach((ev) => window.addEventListener(ev, touch, { passive: true }));
+
+    const timer = window.setInterval(() => {
+      const idleMs = Date.now() - lastActivityAtRef.current;
+      const remainingMs = IDLE_TIMEOUT_MS - idleMs;
+      if (remainingMs <= 0) {
+        void logout();
+      } else if (remainingMs <= IDLE_WARNING_MS) {
+        setSessionWarningSeconds(Math.ceil(remainingMs / 1000));
+      } else {
+        setSessionWarningSeconds(null);
+      }
+    }, 10_000);
+
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, touch));
+      window.clearInterval(timer);
+    };
+  }, [user, logout]);
+
   const signInWithGoogle = async () => {
     await signInWithPopup(auth, googleProvider);
   };
 
-  const logout = async () => {
-    await signOut(auth);
+  const signInWithUsername = async (identifier: string, password: string) => {
+    await loginWithUsernameAndPassword(identifier, password);
+  };
+
+  const changeCurrentUserPassword = async (currentPassword: string, newPassword: string) => {
+    await changeAuthenticatedUserPassword({
+      currentPassword,
+      newPassword,
+      organizationId: organization?.id || profile?.organizationId || DEFAULT_ORG_ID,
+      ownerId: organization?.ownerId || user?.uid || '',
+      authorizedUserIds: organization?.authorizedUserIds || (user ? [user.uid] : []),
+      role: effectiveRole,
+      username: currentMember?.username || profile?.username || '',
+    });
   };
 
   const markNotificationRead = async (notificationId: string) => {
@@ -820,9 +1101,17 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         currentMember,
         effectiveRole,
         effectiveCrmAccess,
+        effectivePermissions,
         isSuperAdmin: effectiveRole === 'super_admin',
         isPlatformOwner: isBootstrapSuper,
+        isStudent,
+        mustChangePassword,
+        accountBlockedReason,
+        subscriptionPolicy,
+        sessionWarningSeconds,
+        extendSession,
         members,
+        loginActivity,
         businessUnits,
         forms,
         submissions,
@@ -843,6 +1132,8 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         saasInvoices,
         saasSalesInquiries,
         signInWithGoogle,
+        signInWithUsername,
+        changeCurrentUserPassword,
         logout,
         markNotificationRead,
         switchOrganization,

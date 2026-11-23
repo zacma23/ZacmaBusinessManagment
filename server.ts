@@ -13,13 +13,17 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Load Firebase web API key from provisioned config for ID token verification (requires no IAM)
+// Load Firebase public web config from provisioned config for token verification & Identity Toolkit REST calls (requires no IAM)
 let firebaseWebApiKey = '';
+let firebaseProjectId = '';
+let firebaseDatabaseId = '(default)';
 try {
   const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
   if (fs.existsSync(cfgPath)) {
     const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
     firebaseWebApiKey = parsed.apiKey || '';
+    firebaseProjectId = parsed.projectId || '';
+    firebaseDatabaseId = parsed.firestoreDatabaseId || '(default)';
   }
 } catch {
   // Ignore if config not present yet
@@ -134,6 +138,447 @@ async function startServer() {
   // Health check
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', service: 'zacma-saas-portal' });
+  });
+
+  // ===========================================================================
+  // AUTHENTICATION HELPERS (Brute-Force Lockout, Username Lookup, Identity Toolkit)
+  // ===========================================================================
+  const loginFailures = new Map<string, { count: number; lockedUntil: number }>();
+  const MAX_LOGIN_FAILURES = 5;
+  const LOCKOUT_WINDOW_MS = 15 * 60_000;
+
+  function checkLoginLockout(key: string): { locked: boolean; retryAfterSeconds: number } {
+    const now = Date.now();
+    const record = loginFailures.get(key);
+    if (!record) return { locked: false, retryAfterSeconds: 0 };
+    if (record.lockedUntil > now) {
+      return { locked: true, retryAfterSeconds: Math.ceil((record.lockedUntil - now) / 1000) };
+    }
+    if (record.lockedUntil > 0 && record.lockedUntil <= now) {
+      loginFailures.delete(key);
+    }
+    return { locked: false, retryAfterSeconds: 0 };
+  }
+
+  function recordLoginFailure(key: string): number {
+    const now = Date.now();
+    const current = loginFailures.get(key) || { count: 0, lockedUntil: 0 };
+    const nextCount = current.count + 1;
+    const lockedUntil = nextCount >= MAX_LOGIN_FAILURES ? now + LOCKOUT_WINDOW_MS : 0;
+    loginFailures.set(key, { count: nextCount, lockedUntil });
+    return Math.max(0, MAX_LOGIN_FAILURES - nextCount);
+  }
+
+  function clearLoginFailures(key: string): void {
+    loginFailures.delete(key);
+  }
+
+  function isValidUsernameFormat(raw: string): boolean {
+    return /^[a-z0-9._-]{3,40}$/.test(raw);
+  }
+
+  function isStrongPassword(pw: string): { valid: boolean; reason?: string } {
+    if (pw.length < 8 || pw.length > 128) {
+      return { valid: false, reason: 'Password must be between 8 and 128 characters.' };
+    }
+    if (!/[A-Z]/.test(pw)) {
+      return { valid: false, reason: 'Password must include at least one uppercase letter.' };
+    }
+    if (!/[a-z]/.test(pw)) {
+      return { valid: false, reason: 'Password must include at least one lowercase letter.' };
+    }
+    if (!/[0-9]/.test(pw)) {
+      return { valid: false, reason: 'Password must include at least one number.' };
+    }
+    if (!/[^A-Za-z0-9]/.test(pw)) {
+      return { valid: false, reason: 'Password must include at least one special character.' };
+    }
+    return { valid: true };
+  }
+
+  async function lookupUsernameInFirestore(username: string): Promise<{
+    loginEmail: string;
+    uid: string;
+    organizationId: string;
+    status: string;
+  } | null> {
+    if (!firebaseProjectId || !isValidUsernameFormat(username)) return null;
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseProjectId)}/databases/${encodeURIComponent(firebaseDatabaseId)}/documents/usernameLookup/${encodeURIComponent(username)}`;
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return null;
+      const doc = (await resp.json()) as {
+        fields?: Record<string, { stringValue?: string }>;
+      };
+      const f = doc.fields;
+      if (!f?.loginEmail?.stringValue || !f?.uid?.stringValue) return null;
+      return {
+        loginEmail: f.loginEmail.stringValue,
+        uid: f.uid.stringValue,
+        organizationId: f.organizationId?.stringValue || '',
+        status: f.status?.stringValue || 'active',
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // Check live Firebase Authentication provider readiness (safe public diagnostics only)
+  app.get('/api/auth/provider-status', async (_req, res) => {
+    if (!firebaseWebApiKey) {
+      res.json({
+        projectId: firebaseProjectId,
+        googleEnabled: true,
+        emailPasswordEnabled: false,
+        detail: 'Firebase web configuration not found.',
+      });
+      return;
+    }
+    try {
+      // Lightweight non-mutating probe with an impossible credential to inspect provider enablement
+      const probe = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(firebaseWebApiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: 'probe-status-check@invalid.zacma.local',
+            password: 'ProbeCheck#0000',
+            returnSecureToken: false,
+          }),
+        }
+      );
+      const data = (await probe.json()) as { error?: { message?: string } };
+      const errMsg = data?.error?.message || '';
+      const disabled =
+        errMsg.includes('PASSWORD_LOGIN_DISABLED') || errMsg.includes('OPERATION_NOT_ALLOWED');
+      res.json({
+        projectId: firebaseProjectId,
+        googleEnabled: true,
+        emailPasswordEnabled: !disabled,
+        detail: disabled
+          ? 'Email/Password sign-in is disabled in Firebase Console. Enable it under Authentication → Sign-in method → Email/Password.'
+          : 'Email/Password sign-in is active.',
+      });
+    } catch {
+      res.json({
+        projectId: firebaseProjectId,
+        googleEnabled: true,
+        emailPasswordEnabled: false,
+        detail: 'Unable to probe Firebase Auth provider right now.',
+      });
+    }
+  });
+
+  // Resolve username/email + verify password via Firebase Identity Toolkit with brute-force lockout
+  app.post('/api/auth/username-login', async (req, res) => {
+    const ip = req.ip || 'unknown';
+    const rawIdentifier =
+      typeof req.body?.identifier === 'string' ? req.body.identifier.trim().toLowerCase() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (!rawIdentifier || !password) {
+      res.status(400).json({ error: 'Username (or email) and password are required.' });
+      return;
+    }
+    if (rawIdentifier.length > 200 || password.length > 128) {
+      res.status(400).json({ error: 'Invalid credential length.' });
+      return;
+    }
+
+    const lockoutKey = `${ip}:${rawIdentifier}`;
+    const lockState = checkLoginLockout(lockoutKey);
+    if (lockState.locked) {
+      res.status(429).json({
+        code: 'auth/too-many-requests',
+        error: `Too many failed login attempts. Try again in ${Math.ceil(lockState.retryAfterSeconds / 60)} minute(s).`,
+        retryAfterSeconds: lockState.retryAfterSeconds,
+      });
+      return;
+    }
+
+    if (!checkRateLimit(`login-ip:${ip}`, 30, 60_000)) {
+      res.status(429).json({
+        code: 'auth/too-many-requests',
+        error: 'Too many login requests from this network. Please wait a minute.',
+      });
+      return;
+    }
+
+    try {
+      let resolvedEmail = rawIdentifier;
+      if (!rawIdentifier.includes('@')) {
+        const lookup = await lookupUsernameInFirestore(rawIdentifier);
+        if (!lookup) {
+          recordLoginFailure(lockoutKey);
+          res.status(401).json({
+            code: 'auth/invalid-credential',
+            error: 'Invalid username or password.',
+          });
+          return;
+        }
+        if (lookup.status === 'inactive' || lookup.status === 'suspended') {
+          res.status(403).json({
+            code: 'auth/user-disabled',
+            error:
+              lookup.status === 'suspended'
+                ? 'This account has been suspended. Please contact your organization administrator.'
+                : 'This account is inactive. Please contact your organization administrator.',
+          });
+          return;
+        }
+        resolvedEmail = lookup.loginEmail;
+      }
+
+      if (!firebaseWebApiKey) {
+        res.status(500).json({ error: 'Firebase configuration missing on server.' });
+        return;
+      }
+
+      const verifyResp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(firebaseWebApiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: resolvedEmail,
+            password,
+            returnSecureToken: true,
+          }),
+        }
+      );
+
+      const verifyData = (await verifyResp.json()) as {
+        localId?: string;
+        email?: string;
+        error?: { message?: string };
+      };
+
+      if (!verifyResp.ok) {
+        const fbErr = verifyData.error?.message || 'INVALID_LOGIN_CREDENTIALS';
+        if (fbErr.includes('PASSWORD_LOGIN_DISABLED') || fbErr.includes('OPERATION_NOT_ALLOWED')) {
+          res.status(503).json({
+            code: 'auth/operation-not-allowed',
+            error:
+              'Email/Password sign-in is not yet enabled in Firebase Console for this project. Please enable Authentication → Sign-in method → Email/Password.',
+          });
+          return;
+        }
+        if (fbErr.includes('USER_DISABLED')) {
+          res.status(403).json({
+            code: 'auth/user-disabled',
+            error: 'This account has been disabled by an administrator.',
+          });
+          return;
+        }
+        if (fbErr.includes('TOO_MANY_ATTEMPTS_TRY_LATER')) {
+          res.status(429).json({
+            code: 'auth/too-many-requests',
+            error: 'Account temporarily locked due to repeated failed attempts. Please wait and try again.',
+          });
+          return;
+        }
+
+        const remaining = recordLoginFailure(lockoutKey);
+        res.status(401).json({
+          code: 'auth/invalid-credential',
+          error:
+            remaining > 0
+              ? `Invalid username or password. (${remaining} attempt${remaining === 1 ? '' : 's'} remaining before temporary lockout)`
+              : 'Account temporarily locked for 15 minutes after 5 failed attempts.',
+        });
+        return;
+      }
+
+      clearLoginFailures(lockoutKey);
+      res.json({
+        ok: true,
+        loginEmail: resolvedEmail,
+        uid: verifyData.localId || '',
+      });
+    } catch (err: unknown) {
+      console.error('Username login error:', err instanceof Error ? err.message : err);
+      res.status(500).json({ error: 'Authentication service unavailable. Please try again.' });
+    }
+  });
+
+  // Admin-initiated account creation via Firebase Identity Toolkit (does NOT sign out the admin)
+  app.post('/api/auth/admin/create-account', async (req, res) => {
+    const ip = req.ip || 'unknown';
+    if (!checkRateLimit(`admin-create:${ip}`, 30, 60_000)) {
+      res.status(429).json({ error: 'Too many account creation requests. Please wait a minute.' });
+      return;
+    }
+
+    const verified = await verifyFirebaseBearer(req);
+    if (!verified) {
+      res.status(401).json({ error: 'Administrator authentication required.' });
+      return;
+    }
+
+    const loginEmail =
+      typeof req.body?.loginEmail === 'string' ? req.body.loginEmail.trim().toLowerCase() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const displayName = sanitizeText(req.body?.displayName, 120);
+
+    if (!loginEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginEmail)) {
+      res.status(400).json({ error: 'A valid account login email is required.' });
+      return;
+    }
+
+    const pwCheck = isStrongPassword(password);
+    if (!pwCheck.valid) {
+      res.status(400).json({ error: pwCheck.reason || 'Password does not meet security policy.' });
+      return;
+    }
+
+    if (!firebaseWebApiKey) {
+      res.status(500).json({ error: 'Firebase configuration missing on server.' });
+      return;
+    }
+
+    try {
+      const signUpResp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(firebaseWebApiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: loginEmail,
+            password,
+            returnSecureToken: true,
+          }),
+        }
+      );
+
+      const signUpData = (await signUpResp.json()) as {
+        localId?: string;
+        idToken?: string;
+        email?: string;
+        error?: { message?: string };
+      };
+
+      if (!signUpResp.ok || !signUpData.localId) {
+        const fbErr = signUpData.error?.message || 'ACCOUNT_CREATE_FAILED';
+        if (fbErr.includes('OPERATION_NOT_ALLOWED') || fbErr.includes('PASSWORD_LOGIN_DISABLED')) {
+          res.status(503).json({
+            code: 'auth/operation-not-allowed',
+            error:
+              'Email/Password authentication is currently disabled in Firebase Console. Enable Authentication → Sign-in method → Email/Password on project zacma-4881c first.',
+          });
+          return;
+        }
+        if (fbErr.includes('EMAIL_EXISTS')) {
+          res.status(409).json({
+            code: 'auth/email-already-in-use',
+            error: 'An account with this email or username login already exists in Firebase Authentication.',
+          });
+          return;
+        }
+        if (fbErr.includes('WEAK_PASSWORD')) {
+          res.status(400).json({
+            code: 'auth/weak-password',
+            error: 'Password is too weak. Please choose a stronger password.',
+          });
+          return;
+        }
+        res.status(400).json({ error: `Unable to create user account: ${fbErr}` });
+        return;
+      }
+
+      // Optionally set displayName on the newly created Firebase Auth profile
+      if (displayName && signUpData.idToken) {
+        await fetch(
+          `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${encodeURIComponent(firebaseWebApiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              idToken: signUpData.idToken,
+              displayName,
+              returnSecureToken: false,
+            }),
+          }
+        ).catch(() => {});
+      }
+
+      res.json({
+        uid: signUpData.localId,
+        loginEmail: signUpData.email || loginEmail,
+      });
+    } catch (err: unknown) {
+      console.error('Admin account creation error:', err instanceof Error ? err.message : err);
+      res.status(500).json({ error: 'Failed to provision Firebase Auth account.' });
+    }
+  });
+
+  // Password reset request (supports both username and email; non-enumerating response)
+  app.post('/api/auth/password-reset', async (req, res) => {
+    const ip = req.ip || 'unknown';
+    if (!checkRateLimit(`pw-reset:${ip}`, 10, 15 * 60_000)) {
+      res.status(429).json({ error: 'Too many password reset requests. Please try again later.' });
+      return;
+    }
+
+    const rawIdentifier =
+      typeof req.body?.identifier === 'string' ? req.body.identifier.trim().toLowerCase() : '';
+    if (!rawIdentifier || rawIdentifier.length > 200) {
+      res.status(400).json({ error: 'Please enter your username or email address.' });
+      return;
+    }
+
+    try {
+      let targetEmail = rawIdentifier;
+      if (!rawIdentifier.includes('@')) {
+        const lookup = await lookupUsernameInFirestore(rawIdentifier);
+        if (!lookup) {
+          // Non-enumerating response
+          res.json({
+            ok: true,
+            message:
+              'If a matching account with a deliverable email exists, a password reset link has been sent. Otherwise contact your organization administrator.',
+          });
+          return;
+        }
+        targetEmail = lookup.loginEmail;
+      }
+
+      if (targetEmail.endsWith('.zacma.local')) {
+        res.json({
+          ok: true,
+          requiresAdminReset: true,
+          message:
+            'This username uses an internal organization login without an external recovery email. Please ask your organization administrator to issue a password reset.',
+        });
+        return;
+      }
+
+      if (firebaseWebApiKey) {
+        await fetch(
+          `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${encodeURIComponent(firebaseWebApiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              requestType: 'PASSWORD_RESET',
+              email: targetEmail,
+            }),
+          }
+        );
+      }
+
+      res.json({
+        ok: true,
+        message:
+          'If a matching account exists, a password reset link has been sent to the registered email address.',
+      });
+    } catch {
+      res.json({
+        ok: true,
+        message:
+          'If a matching account exists, a password reset link has been sent to the registered email address.',
+      });
+    }
   });
 
   // ===========================================================================
