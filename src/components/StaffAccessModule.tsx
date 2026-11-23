@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  ArrowRightLeft,
   Check,
   CheckCircle2,
   Copy,
+  Crown,
   Edit3,
   ExternalLink,
   Eye,
@@ -29,9 +31,11 @@ import {
   DEFAULT_ROLE_PERMISSIONS,
   fetchAuthProviderStatus,
   generateStrongPassword,
+  isProtectedSystemOwnerAccount,
   normalizeUsername,
   requestPasswordReset,
   resolveEffectivePermissions,
+  transferSystemOwnership,
   validatePasswordStrength,
   type AuthProviderStatus,
 } from '../lib/authService';
@@ -39,6 +43,8 @@ import {
   FIREBASE_CONSOLE_AUTH_DOMAINS_URL,
   FIREBASE_CONSOLE_SIGNIN_METHODS_URL,
   FIREBASE_PROJECT_ID,
+  SYSTEM_OWNER_EMAIL,
+  SYSTEM_OWNER_NAME,
 } from '../lib/firebase';
 import { canManageOrg, formatTimestamp } from '../lib/zacmaService';
 import type { MemberPermissions, OrganizationMember, UserRole } from '../types';
@@ -88,13 +94,16 @@ export function StaffAccessModule() {
     effectiveRole,
     effectivePermissions,
     isPlatformOwner,
+    isSystemOwner,
+    systemOwnerConfig,
+    serverVerifiedSession,
     members,
     loginActivity,
     businessUnits,
     subscriptionPolicy,
   } = usePortal();
 
-  const canManage = canManageOrg(effectiveRole) || effectivePermissions.userManagement;
+  const canManage = isSystemOwner || canManageOrg(effectiveRole) || effectivePermissions.userManagement;
 
   const [activeTab, setActiveTab] = useState<'directory' | 'security'>('directory');
   const [searchQuery, setSearchQuery] = useState('');
@@ -145,6 +154,13 @@ export function StaffAccessModule() {
   const [busyUid, setBusyUid] = useState<string | null>(null);
   const [confirmDeleteMember, setConfirmDeleteMember] = useState<OrganizationMember | null>(null);
 
+  // Controlled System Owner transfer modal (strictly visible to active Primary System Owner)
+  const [transferModalOpen, setTransferModalOpen] = useState(false);
+  const [transferTargetUid, setTransferTargetUid] = useState('');
+  const [transferConfirmText, setTransferConfirmText] = useState('');
+  const [transferring, setTransferring] = useState(false);
+  const [transferError, setTransferError] = useState<string | null>(null);
+
   const loadProviderStatus = async () => {
     setCheckingProvider(true);
     try {
@@ -174,8 +190,8 @@ export function StaffAccessModule() {
       'instructor',
       'student',
     ];
-    return isPlatformOwner ? all : all.filter((r) => r !== 'super_admin');
-  }, [isPlatformOwner]);
+    return isSystemOwner || isPlatformOwner ? all : all.filter((r) => r !== 'super_admin');
+  }, [isSystemOwner, isPlatformOwner]);
 
   const filteredMembers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -226,6 +242,13 @@ export function StaffAccessModule() {
   };
 
   const openEdit = (mem: OrganizationMember) => {
+    if (isProtectedSystemOwnerAccount(mem) && !isSystemOwner) {
+      setActionNotice({
+        text: `The Primary System Owner account (${SYSTEM_OWNER_NAME}) is permanently protected and cannot be modified by other administrators.`,
+        isError: true,
+      });
+      return;
+    }
     setEditing(mem);
     setAuthProviderMode(mem.authProvider || 'google');
     setFormState({
@@ -348,9 +371,13 @@ export function StaffAccessModule() {
 
   const handleToggleStatus = async (mem: OrganizationMember) => {
     if (!organization || !user) return;
-    if (mem.userId === user.uid || mem.userId === organization.ownerId) {
+    if (
+      isProtectedSystemOwnerAccount(mem) ||
+      mem.userId === user.uid ||
+      mem.userId === organization.ownerId
+    ) {
       setActionNotice({
-        text: 'You cannot suspend or deactivate the primary organization owner or yourself.',
+        text: 'You cannot suspend or deactivate the Primary System Owner, organization owner, or yourself.',
         isError: true,
       });
       return;
@@ -428,6 +455,57 @@ export function StaffAccessModule() {
       });
     } finally {
       setBusyUid(null);
+    }
+  };
+
+  const eligibleTransferMembers = useMemo(
+    () =>
+      members.filter(
+        (m) =>
+          m.status === 'active' &&
+          m.role !== 'student' &&
+          Boolean(m.email) &&
+          m.userId !== user?.uid &&
+          !isProtectedSystemOwnerAccount(m)
+      ),
+    [members, user?.uid]
+  );
+
+  const handleTransferOwnership = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isSystemOwner || !user || !organization || !systemOwnerConfig) return;
+    if (transferConfirmText.trim() !== 'TRANSFER OWNERSHIP') {
+      setTransferError('Type TRANSFER OWNERSHIP in all caps to confirm this irreversible action.');
+      return;
+    }
+    const target = eligibleTransferMembers.find((m) => m.userId === transferTargetUid);
+    if (!target) {
+      setTransferError('Select an eligible active member to receive Primary System Ownership.');
+      return;
+    }
+    setTransferring(true);
+    setTransferError(null);
+    try {
+      await transferSystemOwnership({
+        targetMember: target,
+        currentOwnerConfig: systemOwnerConfig,
+        actorId: user.uid,
+        actorName: user.displayName || SYSTEM_OWNER_NAME,
+        organizationId: organization.id,
+        authorizedUserIds: organization.authorizedUserIds,
+      });
+      setTransferModalOpen(false);
+      setTransferTargetUid('');
+      setTransferConfirmText('');
+      setActionNotice({
+        text: `Primary System Ownership transferred to ${target.displayName} (${target.email}).`,
+      });
+    } catch (err: unknown) {
+      setTransferError(
+        err instanceof Error ? err.message : 'Unable to transfer system ownership.'
+      );
+    } finally {
+      setTransferring(false);
     }
   };
 
@@ -613,19 +691,28 @@ export function StaffAccessModule() {
                       const assignedNames = (mem.assignedBusinessUnitIds || [])
                         .map((id) => businessUnits.find((b) => b.id === id)?.name)
                         .filter(Boolean);
+                      const isProtectedOwner = isProtectedSystemOwnerAccount(mem);
                       const isSelfOrOwner =
-                        mem.userId === user?.uid || mem.userId === organization?.ownerId;
+                        isProtectedOwner ||
+                        mem.userId === user?.uid ||
+                        mem.userId === organization?.ownerId;
 
                       return (
                         <tr key={mem.userId} className="hover:bg-slate-50/70">
                           <td className="py-3 px-4">
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <span className="font-semibold text-slate-900">
                                 {mem.displayName}
                               </span>
                               <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
                                 {mem.authProvider === 'username_password' ? 'Username' : 'Google'}
                               </span>
+                              {isProtectedOwner && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800">
+                                  <Crown className="w-3 h-3 text-amber-600" />
+                                  <span>Primary System Owner · Protected</span>
+                                </span>
+                              )}
                             </div>
                             <div className="text-xs text-slate-500 mt-0.5">
                               {mem.username ? (
@@ -638,20 +725,22 @@ export function StaffAccessModule() {
                             <div className="text-xs font-semibold text-slate-800">
                               {ROLE_LABELS[mem.role] || mem.role}
                             </div>
-                            {mem.mustChangePassword && (
+                            {mem.mustChangePassword && !isProtectedOwner && (
                               <div className="text-[10px] text-amber-700 mt-0.5">
                                 Must change password on next login
                               </div>
                             )}
                           </td>
                           <td className="py-3 px-4 text-xs text-slate-600">
-                            {mem.role === 'student'
-                              ? 'Isolated Student Portal'
-                              : mem.role === 'super_admin' || mem.role === 'org_admin'
-                                ? 'All Business Units'
-                                : assignedNames.length > 0
-                                  ? assignedNames.join(' · ')
-                                  : 'Organization Scope'}
+                            {isProtectedOwner
+                              ? 'Global Platform Access'
+                              : mem.role === 'student'
+                                ? 'Isolated Student Portal'
+                                : mem.role === 'super_admin' || mem.role === 'org_admin'
+                                  ? 'All Business Units'
+                                  : assignedNames.length > 0
+                                    ? assignedNames.join(' · ')
+                                    : 'Organization Scope'}
                           </td>
                           <td className="py-3 px-4 text-xs font-mono text-slate-500">
                             {mem.lastLoginAt ? formatTimestamp(mem.lastLoginAt) : 'Never'}
@@ -672,16 +761,18 @@ export function StaffAccessModule() {
                           {canManage && (
                             <td className="py-3 px-4 text-right">
                               <div className="inline-flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  disabled={busyUid === mem.userId}
-                                  onClick={() => openEdit(mem)}
-                                  title="Edit role & permissions"
-                                  className="p-1.5 text-slate-600 hover:text-blue-700 hover:bg-blue-50 rounded-md cursor-pointer"
-                                >
-                                  <Edit3 className="w-3.5 h-3.5" />
-                                </button>
-                                {mem.authProvider === 'username_password' && (
+                                {(!isProtectedOwner || isSystemOwner) && (
+                                  <button
+                                    type="button"
+                                    disabled={busyUid === mem.userId}
+                                    onClick={() => openEdit(mem)}
+                                    title="Edit role & permissions"
+                                    className="p-1.5 text-slate-600 hover:text-blue-700 hover:bg-blue-50 rounded-md cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {mem.authProvider === 'username_password' && !isProtectedOwner && (
                                   <button
                                     type="button"
                                     disabled={busyUid === mem.userId}
@@ -691,6 +782,15 @@ export function StaffAccessModule() {
                                   >
                                     <KeyRound className="w-3.5 h-3.5" />
                                   </button>
+                                )}
+                                {isProtectedOwner && !isSystemOwner && (
+                                  <span
+                                    title="Protected Primary System Owner"
+                                    className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-400 px-1.5"
+                                  >
+                                    <Lock className="w-3.5 h-3.5" />
+                                    <span>Locked</span>
+                                  </span>
                                 )}
                                 {!isSelfOrOwner && (
                                   <>
@@ -874,8 +974,87 @@ export function StaffAccessModule() {
               <div className="pt-2 border-t border-slate-100 grid grid-cols-2 gap-2 text-[11px] text-slate-600">
                 <div>✓ 5-attempt brute-force lockout</div>
                 <div>✓ Strong 8+ char password policy</div>
-                <div>✓ 60-min inactivity auto-logout</div>
+                <div>✓ 4-hour idle session protection</div>
                 <div>✓ Forced first-login reset</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Permanent System Owner Governance Card */}
+          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 flex items-center justify-center shrink-0">
+                  <Crown className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="font-display text-base font-bold text-slate-900">
+                    Permanent System Owner Protection
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Tamper-protected global platform authority anchored in Firestore security rules.
+                  </p>
+                </div>
+              </div>
+              {isSystemOwner && systemOwnerConfig && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTransferError(null);
+                    setTransferTargetUid('');
+                    setTransferConfirmText('');
+                    setTransferModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors shrink-0 cursor-pointer"
+                >
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                  <span>Transfer Ownership</span>
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+              <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-100">
+                <div className="text-[11px] text-slate-500">Primary System Owner</div>
+                <div className="font-semibold text-slate-900 mt-1">
+                  {systemOwnerConfig?.ownerName || SYSTEM_OWNER_NAME}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5 truncate">
+                  {systemOwnerConfig?.ownerEmail || SYSTEM_OWNER_EMAIL}
+                </div>
+              </div>
+              <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-100">
+                <div className="text-[11px] text-slate-500">Account Classification</div>
+                <div className="font-semibold text-blue-700 mt-1">
+                  Primary System Owner
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5">
+                  Super Admin · Global Scope
+                </div>
+              </div>
+              <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-100">
+                <div className="text-[11px] text-slate-500">Session Authority</div>
+                <div className="font-semibold text-emerald-700 mt-1 inline-flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>
+                    {serverVerifiedSession?.source === 'server'
+                      ? 'Verified by Backend Server'
+                      : 'Verified by Firebase Auth'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5">
+                  Persistent IndexedDB / Local session
+                </div>
+              </div>
+              <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-100">
+                <div className="text-[11px] text-slate-500">Firestore Security Lock</div>
+                <div className="font-semibold text-slate-900 mt-1 inline-flex items-center gap-1">
+                  <Lock className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Delete Forbidden</span>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5">
+                  Protected against demotion &amp; suspension
+                </div>
               </div>
             </div>
           </div>
@@ -1411,6 +1590,97 @@ export function StaffAccessModule() {
                 {busyUid === confirmDeleteMember.userId ? 'Removing…' : 'Remove Account'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* CONTROLLED SYSTEM OWNERSHIP TRANSFER MODAL (OWNER-ONLY) */}
+      {transferModalOpen && isSystemOwner && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-200 max-w-md w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-amber-700">
+                <Crown className="w-5 h-5" />
+                <h3 className="font-display text-base font-bold text-slate-900">
+                  Transfer Primary System Ownership
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTransferModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-900 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              This transfers the tamper-protected <code className="font-mono">platformConfig/systemOwner</code>{' '}
+              anchor to another verified active administrator. Every transfer is recorded in the
+              immutable audit log.
+            </p>
+            <form onSubmit={handleTransferOwnership} className="space-y-3">
+              {transferError && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+                  {transferError}
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  New Primary System Owner *
+                </label>
+                <select
+                  required
+                  value={transferTargetUid}
+                  onChange={(e) => setTransferTargetUid(e.target.value)}
+                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white"
+                >
+                  <option value="">Select an active staff/admin account…</option>
+                  {eligibleTransferMembers.map((m) => (
+                    <option key={m.userId} value={m.userId}>
+                      {m.displayName} ({m.email}) — {ROLE_LABELS[m.role] || m.role}
+                    </option>
+                  ))}
+                </select>
+                {eligibleTransferMembers.length === 0 && (
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    No other active administrator/staff accounts with verified emails exist yet.
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Type <span className="font-mono text-red-700">TRANSFER OWNERSHIP</span> to confirm
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={transferConfirmText}
+                  onChange={(e) => setTransferConfirmText(e.target.value)}
+                  placeholder="TRANSFER OWNERSHIP"
+                  className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setTransferModalOpen(false)}
+                  className="px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    transferring ||
+                    !transferTargetUid ||
+                    transferConfirmText.trim() !== 'TRANSFER OWNERSHIP'
+                  }
+                  className="px-4 py-2 text-xs font-semibold bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg cursor-pointer"
+                >
+                  {transferring ? 'Transferring…' : 'Confirm Ownership Transfer'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

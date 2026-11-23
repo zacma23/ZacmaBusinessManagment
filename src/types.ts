@@ -76,6 +76,35 @@ export interface FormField {
   conditionalEqualsValue?: string;
 }
 
+export type AccountType = 'primary_system_owner' | 'tenant_admin' | 'staff' | 'student';
+
+export interface SystemOwnerConfig {
+  id: 'systemOwner';
+  ownerUid: string;
+  ownerEmail: string;
+  ownerName: string;
+  accountType: 'primary_system_owner';
+  role: 'super_admin';
+  status: 'active';
+  protected: boolean;
+  transferCount: number;
+  lastVerifiedAt: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+export interface ServerVerifiedSession {
+  authenticated: boolean;
+  uid: string;
+  email: string;
+  emailVerified: boolean;
+  isSystemOwner: boolean;
+  accountType: AccountType;
+  ownerName: string;
+  verifiedAt: string;
+  source: 'server' | 'firebase_sdk';
+}
+
 export interface UserProfile {
   uid: string;
   email: string;
@@ -86,6 +115,8 @@ export interface UserProfile {
   authProvider?: 'google' | 'username_password';
   mustChangePassword?: boolean;
   status?: 'active' | 'inactive' | 'suspended';
+  isSystemOwner?: boolean;
+  accountType?: AccountType;
   lastLoginAt?: string;
   organizationId: string;
   role: UserRole;
@@ -119,6 +150,8 @@ export interface OrganizationMember {
   permissions?: MemberPermissions;
   authProvider?: 'google' | 'username_password';
   mustChangePassword?: boolean;
+  isSystemOwner?: boolean;
+  accountType?: AccountType;
   lastLoginAt?: string;
   assignedBusinessUnitIds: string[];
   status: 'active' | 'inactive' | 'invited' | 'suspended';

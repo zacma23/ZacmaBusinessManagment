@@ -21,14 +21,18 @@ import {
   handleFirestoreError,
   OperationType,
   parseFirebaseAuthError,
+  SYSTEM_OWNER_EMAIL,
+  SYSTEM_OWNER_NAME,
 } from './firebase';
-import { clampList, clampStr, generateId, logAuditEvent } from './zacmaService';
+import { clampList, clampStr, DEFAULT_ORG_ID, generateId, logAuditEvent } from './zacmaService';
 import type {
   LoginActivityRecord,
   MemberPermissions,
   OrganizationMember,
   SaasTenantSubscription,
+  ServerVerifiedSession,
   SubscriptionPolicy,
+  SystemOwnerConfig,
   UserRole,
 } from '../types';
 import defaultFirebaseConfig from '../../firebase-applet-config.json';
@@ -345,6 +349,160 @@ export async function fetchAuthProviderStatus(): Promise<AuthProviderStatus> {
 }
 
 // =============================================================================
+// PERMANENT SYSTEM OWNER VERIFICATION & PROTECTION (ZEKIMULUKEN)
+// =============================================================================
+
+export function isProtectedSystemOwnerAccount(account: {
+  email?: string;
+  isSystemOwner?: boolean;
+  accountType?: string;
+}): boolean {
+  return Boolean(
+    account.isSystemOwner === true ||
+      account.accountType === 'primary_system_owner' ||
+      (account.email && account.email.toLowerCase() === SYSTEM_OWNER_EMAIL.toLowerCase())
+  );
+}
+
+/**
+ * Verifies the active Firebase ID token against the backend server (/api/auth/session-verify).
+ * Never triggers logout on transient network errors or static-host 404s.
+ */
+export async function verifySessionWithServer(): Promise<ServerVerifiedSession | null> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) return null;
+
+  try {
+    const idToken = await currentUser.getIdToken();
+    const resp = await fetch('/api/auth/session-verify', {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    if (resp.ok) {
+      return (await resp.json()) as ServerVerifiedSession;
+    }
+  } catch {
+    // Graceful fallback when running on static Vercel SPA without Express routes
+  }
+
+  const email = (currentUser.email || '').toLowerCase();
+  const isOwner = Boolean(currentUser.emailVerified && email === SYSTEM_OWNER_EMAIL.toLowerCase());
+  return {
+    authenticated: true,
+    uid: currentUser.uid,
+    email,
+    emailVerified: Boolean(currentUser.emailVerified),
+    isSystemOwner: isOwner,
+    accountType: isOwner ? 'primary_system_owner' : 'staff',
+    ownerName: isOwner ? SYSTEM_OWNER_NAME : currentUser.displayName || email,
+    verifiedAt: new Date().toISOString(),
+    source: 'firebase_sdk',
+  };
+}
+
+/**
+ * Idempotently binds Zekimuluken's verified account to the tamper-proof platformConfig/systemOwner
+ * anchor in Firestore without ever creating duplicate user accounts.
+ */
+export async function ensureSystemOwnerAnchor(params: {
+  uid: string;
+  email: string;
+}): Promise<SystemOwnerConfig | null> {
+  const ref = doc(db, 'platformConfig/systemOwner');
+  const nowIso = new Date().toISOString();
+  try {
+    const snap = await getDoc(ref);
+    if (!snap.exists()) {
+      const payload: SystemOwnerConfig = {
+        id: 'systemOwner',
+        ownerUid: params.uid,
+        ownerEmail: params.email.toLowerCase(),
+        ownerName: SYSTEM_OWNER_NAME,
+        accountType: 'primary_system_owner',
+        role: 'super_admin',
+        status: 'active',
+        protected: true,
+        transferCount: 0,
+        lastVerifiedAt: nowIso,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      await setDoc(ref, payload);
+      return payload;
+    }
+
+    const existing = snap.data() as SystemOwnerConfig;
+    // Update verification timestamp cleanly if this is the active System Owner
+    if (
+      existing.ownerUid === params.uid ||
+      params.email.toLowerCase() === SYSTEM_OWNER_EMAIL.toLowerCase()
+    ) {
+      await updateDoc(ref, {
+        ownerUid: params.uid,
+        ownerEmail: existing.ownerEmail || params.email.toLowerCase(),
+        ownerName: existing.ownerName || SYSTEM_OWNER_NAME,
+        lastVerifiedAt: nowIso,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+      return {
+        ...existing,
+        ownerUid: params.uid,
+        lastVerifiedAt: nowIso,
+      };
+    }
+    return existing;
+  } catch (err) {
+    console.warn('SystemOwner anchor sync warning:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * Authorized System Owner ownership transfer procedure (strictly gated by Firestore rules to current System Owner).
+ */
+export async function transferSystemOwnership(params: {
+  targetMember: OrganizationMember;
+  currentOwnerConfig: SystemOwnerConfig;
+  actorId: string;
+  actorName: string;
+  organizationId: string;
+  authorizedUserIds: string[];
+}): Promise<void> {
+  if (!params.targetMember.userId || !params.targetMember.email) {
+    throw new Error('Target account must have a valid UID and verified email address.');
+  }
+  if (params.targetMember.status !== 'active') {
+    throw new Error('Ownership can only be transferred to an active user account.');
+  }
+
+  const nowIso = new Date().toISOString();
+  const ref = doc(db, 'platformConfig/systemOwner');
+  try {
+    await updateDoc(ref, {
+      ownerUid: params.targetMember.userId,
+      ownerEmail: params.targetMember.email.toLowerCase(),
+      ownerName: clampStr(params.targetMember.displayName, 120),
+      transferCount: (params.currentOwnerConfig.transferCount || 0) + 1,
+      lastVerifiedAt: nowIso,
+      updatedAt: serverTimestamp(),
+    });
+
+    await logAuditEvent({
+      organizationId: params.organizationId || DEFAULT_ORG_ID,
+      ownerId: params.actorId,
+      authorizedUserIds: params.authorizedUserIds,
+      actorId: params.actorId,
+      actorName: params.actorName,
+      action: 'platform.ownership_transferred',
+      resourceType: 'system_owner',
+      resourceId: 'systemOwner',
+      summary: `Transferred Primary System Owner authority to ${params.targetMember.displayName} (${params.targetMember.email})`,
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, 'platformConfig/systemOwner');
+  }
+}
+
+// =============================================================================
 // USERNAME + PASSWORD SIGN-IN (REAL FIREBASE AUTH + BRUTE-FORCE PROTECTION)
 // =============================================================================
 
@@ -642,6 +800,8 @@ export async function adminProvisionUserAccount(
           loginEmail,
           password: params.password,
           displayName: cleanName,
+          organizationId: params.organizationId,
+          role: params.role,
         }),
       });
       if (resp.status !== 404) {
@@ -820,6 +980,13 @@ export async function adminUpdateUserAccount(params: {
   actorName: string;
 }): Promise<void> {
   const targetUid = params.existing.userId;
+  if (isProtectedSystemOwnerAccount(params.existing)) {
+    if (params.updates.role !== 'super_admin' || params.updates.status !== 'active') {
+      throw new Error(
+        'The Primary System Owner account (Zekimuluken) is permanently protected and cannot be demoted, deactivated, or suspended.'
+      );
+    }
+  }
   const isStudent = params.updates.role === 'student';
   const isActiveStaff = !isStudent && params.updates.status === 'active';
 
@@ -923,6 +1090,11 @@ export async function adminDeleteUserAccount(params: {
 }): Promise<void> {
   if (params.member.userId === params.actorId) {
     throw new Error('You cannot delete your own active administrator account.');
+  }
+  if (isProtectedSystemOwnerAccount(params.member)) {
+    throw new Error(
+      'The Primary System Owner account (Zekimuluken) is permanently protected and cannot be deleted.'
+    );
   }
   if (params.member.userId === params.ownerId) {
     throw new Error('The primary organization owner account cannot be deleted.');

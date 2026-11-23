@@ -1,13 +1,21 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   browserLocalPersistence,
+  browserPopupRedirectResolver,
+  browserSessionPersistence,
   getAuth,
   GoogleAuthProvider,
-  setPersistence,
+  indexedDBLocalPersistence,
+  initializeAuth,
+  type Auth,
 } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import defaultFirebaseConfig from '../../firebase-applet-config.json';
+
+// Permanent Primary System Owner identity (anchored in Firestore rules & backend server)
+export const SYSTEM_OWNER_NAME = 'Zekimuluken';
+export const SYSTEM_OWNER_EMAIL = 'zekimuluken@gmail.com';
 
 // Allow Vercel production/preview environment variables to override firebase-applet-config.json
 // without ever embedding server secrets in frontend code.
@@ -30,17 +38,32 @@ export const FIREBASE_AUTH_DOMAIN = resolvedConfig.authDomain;
 export const FIREBASE_CONSOLE_AUTH_DOMAINS_URL = `https://console.firebase.google.com/project/${resolvedConfig.projectId}/authentication/settings`;
 export const FIREBASE_CONSOLE_SIGNIN_METHODS_URL = `https://console.firebase.google.com/project/${resolvedConfig.projectId}/authentication/providers`;
 
-const app = initializeApp(resolvedConfig);
+const app = getApps().length > 0 ? getApp() : initializeApp(resolvedConfig);
 
 // CRITICAL: Pass resolvedConfig.firestoreDatabaseId so queries target the provisioned database
 export const db = getFirestore(app, resolvedConfig.firestoreDatabaseId);
-export const auth = getAuth(app);
-export const storage = getStorage(app);
 
-// Persist authenticated sessions cleanly across page refreshes and Vercel routes
-void setPersistence(auth, browserLocalPersistence).catch((err) => {
-  console.warn('Auth persistence setup warning:', err instanceof Error ? err.message : err);
-});
+// CRITICAL FIX FOR AUTOMATIC LOGOUT:
+// Configure ordered persistence synchronously at Auth initialization instead of calling
+// fire-and-forget setPersistence() after getAuth(), which caused IndexedDB/localStorage races
+// on Vercel deployments and browser refreshes.
+function initPersistentAuth(): Auth {
+  try {
+    return initializeAuth(app, {
+      persistence: [
+        indexedDBLocalPersistence,
+        browserLocalPersistence,
+        browserSessionPersistence,
+      ],
+      popupRedirectResolver: browserPopupRedirectResolver,
+    });
+  } catch {
+    return getAuth(app);
+  }
+}
+
+export const auth = initPersistentAuth();
+export const storage = getStorage(app);
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
@@ -198,7 +221,17 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null
 ): never {
-  const errInfo: FirestoreErrorInfo = {
+  const errInfo = buildFirestoreErrorInfo(error, operationType, path);
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+function buildFirestoreErrorInfo(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): FirestoreErrorInfo {
+  return {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
       userId: auth.currentUser?.uid,
@@ -215,8 +248,18 @@ export function handleFirestoreError(
     operationType,
     path,
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+}
+
+// Non-throwing variant for real-time onSnapshot listeners so transient network or permission
+// hiccups are logged cleanly and NEVER crash the React tree or force an unexpected logout.
+export function logFirestoreListenerError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): FirestoreErrorInfo {
+  const errInfo = buildFirestoreErrorInfo(error, operationType, path);
+  console.warn('Firestore Listener Warning: ', JSON.stringify(errInfo));
+  return errInfo;
 }
 
 // Validate connectivity on startup

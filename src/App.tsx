@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   LayoutDashboard,
   Building2,
@@ -34,6 +34,9 @@ import {
   ChevronsUpDown,
   AlertTriangle,
   Clock,
+  Crown,
+  Lock,
+  RefreshCw,
 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PortalProvider, usePortal } from './context/PortalContext';
@@ -53,6 +56,7 @@ import { AiSupportAdminModule } from './components/AiSupportAdminModule';
 import { SupportChatWidget } from './components/SupportChatWidget';
 import { StudentPortalView } from './components/StudentPortalView';
 import { canManageForms, canManageOrg } from './lib/zacmaService';
+import { SYSTEM_OWNER_NAME } from './lib/firebase';
 import type { LeadFilterPreset, NavSection } from './types';
 
 function parsePublicFormRoute(): { businessUnitSlug: string; formSlug: string } | null {
@@ -114,7 +118,12 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
     effectiveCrmAccess,
     effectivePermissions,
     isPlatformOwner,
+    isSystemOwner,
     isStudent,
+    profileError,
+    syncWarning,
+    dismissSyncWarning,
+    retryProfileSync,
     subscriptionPolicy,
     sessionWarningSeconds,
     extendSession,
@@ -129,6 +138,7 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
   const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [switchingOrg, setSwitchingOrg] = useState(false);
+  const [retryingSync, setRetryingSync] = useState(false);
 
   // Cross-module contextual navigation presets
   const [selectedBuPreset, setSelectedBuPreset] = useState<string | undefined>(undefined);
@@ -145,11 +155,59 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
     directName?: string;
   } | null>(null);
 
-  const canManageFormsFlag = canManageForms(effectiveRole) || effectivePermissions.forms;
-  const canManageOrgFlag = canManageOrg(effectiveRole) || effectivePermissions.userManagement;
-  const canAccessComms = effectiveCrmAccess || effectivePermissions.communications;
-  const canAccessAiSupport = canManageOrgFlag || effectiveCrmAccess || effectivePermissions.aiSupport;
-  const canAccessBilling = canManageOrg(effectiveRole) || effectivePermissions.billing;
+  const canManageFormsFlag = isSystemOwner || canManageForms(effectiveRole) || effectivePermissions.forms;
+  const canManageOrgFlag = isSystemOwner || canManageOrg(effectiveRole) || effectivePermissions.userManagement;
+  const canAccessComms = isSystemOwner || effectiveCrmAccess || effectivePermissions.communications;
+  const canAccessAiSupport = isSystemOwner || canManageOrgFlag || effectiveCrmAccess || effectivePermissions.aiSupport;
+  const canAccessBilling = isSystemOwner || canManageOrg(effectiveRole) || effectivePermissions.billing;
+  const canAccessReports = isSystemOwner || effectivePermissions.reports || canManageOrgFlag;
+  const canAccessSubmissions = isSystemOwner || effectiveCrmAccess || canManageFormsFlag;
+
+  const isSectionAllowed = useMemo(() => {
+    const allowed: Record<NavSection, boolean> = {
+      business_overview: true,
+      business_units: true,
+      business_staff: canManageOrgFlag,
+      business_reports: canAccessReports,
+      ai_form_generator: canManageFormsFlag,
+      form_builder: canManageFormsFlag,
+      published_forms: true,
+      form_submissions: canAccessSubmissions,
+      form_analytics: true,
+      crm_dashboard: isSystemOwner || effectiveCrmAccess,
+      all_leads: isSystemOwner || effectiveCrmAccess,
+      lead_pipeline: isSystemOwner || effectiveCrmAccess,
+      follow_ups: isSystemOwner || effectiveCrmAccess,
+      communication_center: canAccessComms,
+      message_templates: canAccessComms,
+      crm_reports: isSystemOwner || effectiveCrmAccess,
+      ai_support_overview: canAccessAiSupport,
+      ai_support_courses: canAccessAiSupport,
+      ai_support_knowledge: canAccessAiSupport,
+      ai_support_inbox: canAccessAiSupport,
+      integrations_security: canManageOrgFlag,
+      saas_platform_console: isSystemOwner || isPlatformOwner,
+      tenant_billing: canAccessBilling,
+    };
+    return allowed;
+  }, [
+    isSystemOwner,
+    isPlatformOwner,
+    canManageOrgFlag,
+    canAccessReports,
+    canManageFormsFlag,
+    canAccessSubmissions,
+    effectiveCrmAccess,
+    canAccessComms,
+    canAccessAiSupport,
+    canAccessBilling,
+  ]);
+
+  useEffect(() => {
+    if (!isSectionAllowed[activeSection]) {
+      setActiveSection('business_overview');
+    }
+  }, [activeSection, isSectionAllowed]);
 
   const navGroups: NavGroup[] = useMemo(
     () => [
@@ -252,6 +310,11 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
       };
     }
   ) => {
+    if (!isSectionAllowed[section]) {
+      setActiveSection('business_overview');
+      setMobileMenuOpen(false);
+      return;
+    }
     if (preset?.businessUnitId !== undefined) setSelectedBuPreset(preset.businessUnitId);
     if (preset?.aiPrompt !== undefined) setAiPromptPreset(preset.aiPrompt);
     if (preset?.leadFilter !== undefined) setLeadFilterPreset(preset.leadFilter);
@@ -378,12 +441,28 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
       <div className="p-4 border-t border-slate-200 bg-slate-50/70 shrink-0">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
-            <div className="text-xs font-semibold text-slate-900 truncate">
-              {profile?.displayName || user?.displayName || user?.email}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs font-semibold text-slate-900 truncate">
+                {isSystemOwner
+                  ? profile?.displayName || SYSTEM_OWNER_NAME
+                  : profile?.displayName || user?.displayName || user?.email}
+              </span>
+              {isSystemOwner && (
+                <Crown
+                  className="w-3.5 h-3.5 text-amber-600 shrink-0"
+                  aria-label="Primary System Owner"
+                />
+              )}
             </div>
-            <div className="text-[11px] text-slate-500 capitalize truncate">
+            <div className="text-[11px] text-slate-500 truncate">
               {profile?.username ? `@${profile.username} · ` : ''}
-              {isPlatformOwner ? 'Platform Owner' : effectiveRole.replace('_', ' ')}
+              {isSystemOwner ? (
+                <span className="font-semibold text-blue-700">Primary System Owner</span>
+              ) : isPlatformOwner ? (
+                'Platform Owner'
+              ) : (
+                <span className="capitalize">{effectiveRole.replace('_', ' ')}</span>
+              )}
             </div>
           </div>
           <button
@@ -536,6 +615,47 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
           </div>
         )}
 
+        {/* Non-Blocking Profile Sync Recovery Banner (Never logs user out) */}
+        {profileError && (
+          <div className="bg-amber-50 border-b border-amber-200 px-5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>{profileError} Your session remains active.</span>
+            </div>
+            <button
+              type="button"
+              disabled={retryingSync}
+              onClick={async () => {
+                setRetryingSync(true);
+                try {
+                  await retryProfileSync();
+                } finally {
+                  setRetryingSync(false);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-600 hover:bg-amber-700 disabled:opacity-60 text-white text-xs font-semibold rounded-md cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${retryingSync ? 'animate-spin' : ''}`} />
+              <span>{retryingSync ? 'Syncing…' : 'Retry Sync'}</span>
+            </button>
+          </div>
+        )}
+
+        {/* Non-Blocking Realtime Sync Warning */}
+        {syncWarning && !profileError && (
+          <div className="bg-slate-100 border-b border-slate-200 px-5 py-2 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-700">
+            <span>{syncWarning}</span>
+            <button
+              type="button"
+              onClick={dismissSyncWarning}
+              className="text-slate-500 hover:text-slate-900 cursor-pointer"
+              aria-label="Dismiss sync notice"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Non-Blocking Subscription Renewal Banner (Never locks tenants out of viewing existing data) */}
         {subscriptionPolicy.bannerMessage && (
           <div className="bg-red-50 border-b border-red-200 px-5 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-red-900">
@@ -557,6 +677,28 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
 
         {/* Active Module Viewport */}
         <main className="flex-1 p-5 sm:p-6 lg:p-8 max-w-[1440px] w-full mx-auto">
+          {!isSectionAllowed[activeSection] ? (
+            <div className="max-w-md mx-auto my-12 bg-white border border-slate-200 rounded-xl p-6 text-center space-y-3">
+              <div className="w-10 h-10 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center mx-auto">
+                <Lock className="w-5 h-5" />
+              </div>
+              <h2 className="font-display text-base font-bold text-slate-900">
+                Access Restricted
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Your current role does not have permission to open this module. Contact your
+                workspace administrator if you need access.
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveSection('business_overview')}
+                className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-lg cursor-pointer"
+              >
+                Return to Overview
+              </button>
+            </div>
+          ) : (
+            <>
           {(activeSection === 'business_overview' ||
             activeSection === 'business_reports' ||
             activeSection === 'crm_reports') && (
@@ -634,6 +776,8 @@ function PortalWorkspace({ onOpenStorefront }: { onOpenStorefront: () => void })
           )}
 
           {activeSection === 'integrations_security' && <IntegrationsSecurityModule />}
+            </>
+          )}
         </main>
       </div>
 

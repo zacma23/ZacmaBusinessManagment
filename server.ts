@@ -61,8 +61,21 @@ function checkRateLimit(key: string, maxRequests: number, windowMs: number): boo
   return true;
 }
 
+// Permanent Primary System Owner identity (server-side source of truth)
+const SYSTEM_OWNER_EMAIL = (
+  process.env.ZACMA_SYSTEM_OWNER_EMAIL || 'zekimuluken@gmail.com'
+)
+  .trim()
+  .toLowerCase();
+const SYSTEM_OWNER_NAME = 'Zekimuluken';
+
 // Verify Firebase ID token via Identity Toolkit lookup (works on every Firebase tier without Admin IAM)
-async function verifyFirebaseBearer(req: express.Request): Promise<{ uid: string; email: string; emailVerified: boolean } | null> {
+async function verifyFirebaseBearer(req: express.Request): Promise<{
+  uid: string;
+  email: string;
+  emailVerified: boolean;
+  idToken: string;
+} | null> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return null;
@@ -88,12 +101,77 @@ async function verifyFirebaseBearer(req: express.Request): Promise<{ uid: string
     if (!user?.localId) return null;
     return {
       uid: user.localId,
-      email: user.email || '',
+      email: (user.email || '').toLowerCase(),
       emailVerified: Boolean(user.emailVerified),
+      idToken,
     };
   } catch {
     return null;
   }
+}
+
+// Read a Firestore document using the caller's verified Firebase ID token (enforced by firestore.rules)
+async function fetchFirestoreDocWithToken(
+  docPath: string,
+  idToken: string
+): Promise<Record<string, { stringValue?: string; booleanValue?: boolean }> | null> {
+  if (!firebaseProjectId || !idToken) return null;
+  const encodedPath = docPath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseProjectId)}/databases/${encodeURIComponent(firebaseDatabaseId)}/documents/${encodedPath}`;
+  try {
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as {
+      fields?: Record<string, { stringValue?: string; booleanValue?: boolean }>;
+    };
+    return data.fields || null;
+  } catch {
+    return null;
+  }
+}
+
+// Authoritative server-side identity & permanent System Owner verification
+async function verifyServerIdentity(req: express.Request): Promise<{
+  uid: string;
+  email: string;
+  emailVerified: boolean;
+  idToken: string;
+  isSystemOwner: boolean;
+  ownerName: string;
+  accountType: 'primary_system_owner' | 'tenant_admin' | 'staff' | 'student';
+} | null> {
+  const verified = await verifyFirebaseBearer(req);
+  if (!verified) return null;
+
+  let isSystemOwner =
+    verified.emailVerified && verified.email === SYSTEM_OWNER_EMAIL;
+  let ownerName = SYSTEM_OWNER_NAME;
+
+  // Also check permanent platformConfig/systemOwner anchor (supports verified ownership transfer)
+  if (verified.emailVerified) {
+    const ownerDoc = await fetchFirestoreDocWithToken('platformConfig/systemOwner', verified.idToken);
+    if (ownerDoc) {
+      const docOwnerUid = ownerDoc.ownerUid?.stringValue || '';
+      const docStatus = ownerDoc.status?.stringValue || '';
+      const docOwnerName = ownerDoc.ownerName?.stringValue || SYSTEM_OWNER_NAME;
+      ownerName = docOwnerName;
+      if (docOwnerUid === verified.uid && docStatus === 'active') {
+        isSystemOwner = true;
+      }
+    }
+  }
+
+  return {
+    ...verified,
+    isSystemOwner,
+    ownerName,
+    accountType: isSystemOwner ? 'primary_system_owner' : 'staff',
+  };
 }
 
 const SUPPORTED_FIELD_TYPES = new Set([
@@ -135,9 +213,40 @@ async function startServer() {
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '2mb' }));
 
+  // Ensure Google OAuth popup windows communicate cleanly without session loss
+  app.use((_req, res, next) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
   // Health check
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', service: 'zacma-saas-portal' });
+  });
+
+  // Server-side authoritative session & permanent System Owner verification
+  app.get('/api/auth/session-verify', async (req, res) => {
+    const identity = await verifyServerIdentity(req);
+    if (!identity) {
+      res.status(401).json({
+        authenticated: false,
+        error: 'Valid Firebase ID token required.',
+      });
+      return;
+    }
+
+    res.json({
+      authenticated: true,
+      uid: identity.uid,
+      email: identity.email,
+      emailVerified: identity.emailVerified,
+      isSystemOwner: identity.isSystemOwner,
+      accountType: identity.accountType,
+      ownerName: identity.ownerName,
+      verifiedAt: new Date().toISOString(),
+      source: 'server',
+    });
   });
 
   // ===========================================================================
@@ -410,8 +519,8 @@ async function startServer() {
       return;
     }
 
-    const verified = await verifyFirebaseBearer(req);
-    if (!verified) {
+    const identity = await verifyServerIdentity(req);
+    if (!identity) {
       res.status(401).json({ error: 'Administrator authentication required.' });
       return;
     }
@@ -420,6 +529,37 @@ async function startServer() {
       typeof req.body?.loginEmail === 'string' ? req.body.loginEmail.trim().toLowerCase() : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const displayName = sanitizeText(req.body?.displayName, 120);
+    const organizationId = sanitizeText(req.body?.organizationId, 128);
+    const requestedRole = sanitizeText(req.body?.role, 40) || 'staff';
+
+    // Server-side RBAC check: never trust frontend role claims alone
+    if (!identity.isSystemOwner) {
+      if (requestedRole === 'super_admin' || loginEmail === SYSTEM_OWNER_EMAIL) {
+        res.status(403).json({
+          error: 'Only the verified System Owner can provision Super Admin accounts.',
+        });
+        return;
+      }
+      if (!organizationId || !/^[a-zA-Z0-9_-]{1,128}$/.test(organizationId)) {
+        res.status(400).json({ error: 'Valid organizationId is required for account provisioning.' });
+        return;
+      }
+      const memberFields = await fetchFirestoreDocWithToken(
+        `organizations/${organizationId}/members/${identity.uid}`,
+        identity.idToken
+      );
+      const callerRole = memberFields?.role?.stringValue || '';
+      const callerStatus = memberFields?.status?.stringValue || '';
+      if (
+        callerStatus !== 'active' ||
+        (callerRole !== 'org_admin' && callerRole !== 'super_admin')
+      ) {
+        res.status(403).json({
+          error: 'Active organization administrator privileges are required to create user accounts.',
+        });
+        return;
+      }
+    }
 
     if (!loginEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(loginEmail)) {
       res.status(400).json({ error: 'A valid account login email is required.' });

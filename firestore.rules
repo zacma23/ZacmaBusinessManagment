@@ -60,6 +60,21 @@ service cloud.firestore {
       return isVerifiedUser() && request.auth.token.email == 'zekimuluken@gmail.com';
     }
 
+    function isSystemOwner() {
+      return isBootstrapSuperAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/platformConfig/systemOwner) &&
+        get(/databases/$(database)/documents/platformConfig/systemOwner).data.ownerUid == request.auth.uid &&
+        get(/databases/$(database)/documents/platformConfig/systemOwner).data.status == 'active'
+      );
+    }
+
+    function isProtectedOwnerDoc(data) {
+      return data.email == 'zekimuluken@gmail.com' ||
+        ('isSystemOwner' in data && data.isSystemOwner == true) ||
+        ('accountType' in data && data.accountType == 'primary_system_owner');
+    }
+
     function memberPath(orgId, uid) {
       return /databases/$(database)/documents/organizations/$(orgId)/members/$(uid);
     }
@@ -113,9 +128,26 @@ service cloud.firestore {
     // ENTITY VALIDATION BLUEPRINTS (ANTI-UPDATE-GAP)
     // =========================================================================
 
+    function isValidSystemOwnerConfig(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'ownerEmail', 'ownerName', 'accountType', 'role', 'status', 'protected', 'transferCount', 'lastVerifiedAt', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'ownerUid', 'ownerEmail', 'ownerName', 'accountType', 'role', 'status', 'protected', 'transferCount', 'lastVerifiedAt', 'createdAt', 'updatedAt']) &&
+        data.id == 'systemOwner' &&
+        isValidId(data.ownerUid) &&
+        isNonEmptyString(data.ownerEmail, 200) &&
+        isNonEmptyString(data.ownerName, 120) &&
+        data.accountType == 'primary_system_owner' &&
+        data.role == 'super_admin' &&
+        data.status == 'active' &&
+        data.protected == true &&
+        data.transferCount is number && data.transferCount >= 0 && data.transferCount <= 1000 &&
+        isBoundedString(data.lastVerifiedAt, 50) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'username', 'phone', 'authProvider', 'mustChangePassword', 'status', 'lastLoginAt', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'username', 'phone', 'authProvider', 'mustChangePassword', 'status', 'isSystemOwner', 'accountType', 'lastLoginAt', 'organizationId', 'role', 'crmAccess', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         isBoundedString(data.email, 200) &&
         isBoundedString(data.displayName, 120) &&
@@ -125,6 +157,8 @@ service cloud.firestore {
         (!('authProvider' in data) || data.authProvider in ['google', 'username_password']) &&
         (!('mustChangePassword' in data) || data.mustChangePassword is bool) &&
         (!('status' in data) || data.status in ['active', 'inactive', 'suspended']) &&
+        (!('isSystemOwner' in data) || data.isSystemOwner is bool) &&
+        (!('accountType' in data) || data.accountType in ['primary_system_owner', 'tenant_admin', 'staff', 'student']) &&
         (!('lastLoginAt' in data) || isBoundedString(data.lastLoginAt, 40)) &&
         isValidId(data.organizationId) &&
         data.role in ['super_admin', 'org_admin', 'bu_manager', 'staff', 'accountant', 'instructor', 'student'] &&
@@ -150,7 +184,7 @@ service cloud.firestore {
 
     function isValidOrgMember(data) {
       return data.keys().hasAll(['userId', 'organizationId', 'email', 'displayName', 'role', 'crmAccess', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['userId', 'organizationId', 'email', 'username', 'phone', 'displayName', 'role', 'crmAccess', 'permissions', 'authProvider', 'mustChangePassword', 'lastLoginAt', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['userId', 'organizationId', 'email', 'username', 'phone', 'displayName', 'role', 'crmAccess', 'permissions', 'authProvider', 'mustChangePassword', 'isSystemOwner', 'accountType', 'lastLoginAt', 'assignedBusinessUnitIds', 'status', 'ownerId', 'authorizedUserIds', 'createdAt', 'updatedAt']) &&
         isValidId(data.userId) &&
         isValidId(data.organizationId) &&
         isBoundedString(data.email, 200) &&
@@ -162,6 +196,8 @@ service cloud.firestore {
         (!('permissions' in data) || data.permissions is map) &&
         (!('authProvider' in data) || data.authProvider in ['google', 'username_password']) &&
         (!('mustChangePassword' in data) || data.mustChangePassword is bool) &&
+        (!('isSystemOwner' in data) || data.isSystemOwner is bool) &&
+        (!('accountType' in data) || data.accountType in ['primary_system_owner', 'tenant_admin', 'staff', 'student']) &&
         (!('lastLoginAt' in data) || isBoundedString(data.lastLoginAt, 40)) &&
         isBoundedStringList(data.assignedBusinessUnitIds, 50) &&
         data.status in ['active', 'inactive', 'invited', 'suspended'] &&
@@ -683,13 +719,36 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // USERS COLLECTION (PII ISOLATED TO OWNER OR BOOTSTRAP SUPER ADMIN)
+    // PLATFORM SYSTEM OWNER ANCHOR (PERMANENT, NON-DELETABLE, OWNER-ONLY WRITE)
+    // =========================================================================
+
+    match /platformConfig/{configId} {
+      allow get: if configId == 'systemOwner' && isSignedIn();
+      allow list: if false;
+      allow create: if configId == 'systemOwner' &&
+        isBootstrapSuperAdmin() &&
+        isValidSystemOwnerConfig(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().ownerEmail == 'zekimuluken@gmail.com' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if configId == 'systemOwner' &&
+        isSystemOwner() &&
+        isValidSystemOwnerConfig(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['ownerUid', 'ownerEmail', 'ownerName', 'transferCount', 'lastVerifiedAt', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // USERS COLLECTION (PII ISOLATED TO OWNER OR SYSTEM OWNER)
     // =========================================================================
 
     match /users/{userId} {
       allow get: if isValidId(userId) && isSignedIn() && (
         request.auth.uid == userId ||
-        isBootstrapSuperAdmin() ||
+        isSystemOwner() ||
         isOrgSuperOrAdmin(existing().organizationId)
       );
       allow list: if isBootstrapSuperAdmin();
@@ -698,14 +757,16 @@ service cloud.firestore {
         incoming().uid == userId &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time && (
-          isBootstrapSuperAdmin() || (
+          isSystemOwner() || (
             isOrgSuperOrAdmin(incoming().organizationId) &&
-            incoming().role != 'super_admin'
+            incoming().role != 'super_admin' &&
+            !isProtectedOwnerDoc(incoming())
           ) || (
             isVerifiedUser() &&
             request.auth.uid == userId &&
             incoming().role == 'staff' &&
-            incoming().crmAccess == false
+            incoming().crmAccess == false &&
+            !isProtectedOwnerDoc(incoming())
           )
         );
       allow update: if isValidId(userId) && isSignedIn() &&
@@ -713,17 +774,25 @@ service cloud.firestore {
         incoming().uid == existing().uid &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
-          (isBootstrapSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'username', 'phone', 'organizationId', 'role', 'crmAccess', 'status', 'mustChangePassword', 'lastLoginAt', 'updatedAt'])) ||
           (
+            isSystemOwner() &&
+            (!isProtectedOwnerDoc(existing()) || (incoming().role == 'super_admin' && (!('status' in incoming()) || incoming().status == 'active'))) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'username', 'phone', 'organizationId', 'role', 'crmAccess', 'status', 'isSystemOwner', 'accountType', 'mustChangePassword', 'lastLoginAt', 'updatedAt'])
+          ) || (
             isOrgSuperOrAdmin(existing().organizationId) &&
+            !isProtectedOwnerDoc(existing()) &&
+            !isProtectedOwnerDoc(incoming()) &&
             incoming().organizationId == existing().organizationId &&
             incoming().role != 'super_admin' &&
+            existing().role != 'super_admin' &&
             incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'username', 'phone', 'role', 'crmAccess', 'status', 'mustChangePassword', 'updatedAt'])
-          ) ||
-          (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'phone', 'mustChangePassword', 'lastLoginAt', 'updatedAt'])) ||
-          (
+          ) || (
+            request.auth.uid == userId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'phone', 'mustChangePassword', 'lastLoginAt', 'updatedAt'])
+          ) || (
             isVerifiedUser() &&
             request.auth.uid == userId &&
+            !isProtectedOwnerDoc(incoming()) &&
             incoming().role == 'super_admin' &&
             incoming().crmAccess == true &&
             incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'organizationId', 'role', 'crmAccess', 'updatedAt']) &&
@@ -731,10 +800,12 @@ service cloud.firestore {
             getAfter(/databases/$(database)/documents/organizations/$(incoming().organizationId)).data.ownerId == request.auth.uid
           )
         );
-      allow delete: if isValidId(userId) && isSignedIn() && userId != request.auth.uid && (
-        isBootstrapSuperAdmin() ||
-        (isOrgSuperOrAdmin(existing().organizationId) && existing().role != 'super_admin')
-      );
+      allow delete: if isValidId(userId) && isSignedIn() &&
+        userId != request.auth.uid &&
+        !isProtectedOwnerDoc(existing()) && (
+          isSystemOwner() ||
+          (isOrgSuperOrAdmin(existing().organizationId) && existing().role != 'super_admin')
+        );
     }
 
     // =========================================================================
@@ -993,7 +1064,7 @@ service cloud.firestore {
       allow delete: if false;
 
       // -----------------------------------------------------------------------
-      // ORGANIZATION MEMBERS (RBAC)
+      // ORGANIZATION MEMBERS (RBAC WITH PERMANENT SYSTEM OWNER PROTECTION)
       // -----------------------------------------------------------------------
       match /members/{userId} {
         allow get: if isValidId(organizationId) && isValidId(userId) && isSignedIn() && (
@@ -1007,10 +1078,15 @@ service cloud.firestore {
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time &&
           existsAfter(/databases/$(database)/documents/organizations/$(organizationId)) && (
-            isOrgSuperOrAdmin(organizationId) || (
+            isSystemOwner() || (
+              isOrgSuperOrAdmin(organizationId) &&
+              incoming().role != 'super_admin' &&
+              !isProtectedOwnerDoc(incoming())
+            ) || (
               isVerifiedUser() &&
               request.auth.uid == userId &&
               incoming().role == 'super_admin' &&
+              !isProtectedOwnerDoc(incoming()) &&
               getAfter(/databases/$(database)/documents/organizations/$(organizationId)).data.ownerId == request.auth.uid
             )
           );
@@ -1022,7 +1098,16 @@ service cloud.firestore {
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time && (
             (
+              isSystemOwner() &&
+              (!isProtectedOwnerDoc(existing()) || (incoming().role == 'super_admin' && incoming().status == 'active')) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'username', 'phone', 'role', 'crmAccess', 'permissions', 'isSystemOwner', 'accountType', 'mustChangePassword', 'lastLoginAt', 'assignedBusinessUnitIds', 'status', 'authorizedUserIds', 'updatedAt'])
+            ) || (
               isOrgSuperOrAdmin(organizationId) &&
+              !isProtectedOwnerDoc(existing()) &&
+              !isProtectedOwnerDoc(incoming()) &&
+              existing().userId != existing().ownerId &&
+              existing().role != 'super_admin' &&
+              incoming().role != 'super_admin' &&
               incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'username', 'phone', 'role', 'crmAccess', 'permissions', 'mustChangePassword', 'lastLoginAt', 'assignedBusinessUnitIds', 'status', 'authorizedUserIds', 'updatedAt'])
             ) || (
               request.auth.uid == userId &&
@@ -1031,8 +1116,12 @@ service cloud.firestore {
             )
           );
         allow delete: if isValidId(organizationId) && isValidId(userId) && isSignedIn() &&
-          isOrgSuperOrAdmin(organizationId) &&
-          userId != request.auth.uid;
+          userId != request.auth.uid &&
+          !isProtectedOwnerDoc(existing()) &&
+          existing().userId != existing().ownerId && (
+            isSystemOwner() ||
+            (isOrgSuperOrAdmin(organizationId) && existing().role != 'super_admin')
+          );
       }
 
       // -----------------------------------------------------------------------

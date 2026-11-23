@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
   signOut,
@@ -18,9 +19,17 @@ import {
   writeBatch,
   updateDoc,
 } from 'firebase/firestore';
-import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../lib/firebase';
 import {
-  BOOTSTRAP_SUPER_ADMIN_EMAIL,
+  auth,
+  db,
+  googleProvider,
+  handleFirestoreError,
+  logFirestoreListenerError,
+  OperationType,
+  SYSTEM_OWNER_EMAIL,
+  SYSTEM_OWNER_NAME,
+} from '../lib/firebase';
+import {
   DEFAULT_ORG_ID,
   detectDuplicateLeads,
   timestampToMillis,
@@ -28,9 +37,12 @@ import {
 import {
   changeAuthenticatedUserPassword,
   computeSubscriptionPolicy,
+  DEFAULT_ROLE_PERMISSIONS,
+  ensureSystemOwnerAnchor,
   logLoginActivity,
   loginWithUsernameAndPassword,
   resolveEffectivePermissions,
+  verifySessionWithServer,
 } from '../lib/authService';
 import type {
   AppNotification,
@@ -50,10 +62,12 @@ import type {
   SaasPlan,
   SaasSalesInquiry,
   SaasTenantSubscription,
+  ServerVerifiedSession,
   StudentRegistration,
   SubscriptionPolicy,
   SupportConversation,
   SupportKnowledgeItem,
+  SystemOwnerConfig,
   TrainingCourse,
   UserProfile,
   UserRole,
@@ -70,22 +84,31 @@ import {
   switchActiveOrganization,
 } from '../lib/saasService';
 
-const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes inactivity auto-logout
-const IDLE_WARNING_MS = 2 * 60 * 1000; // Show 2-minute countdown warning before logout
+const IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours genuine inactivity auto-logout
+const IDLE_WARNING_MS = 2 * 60 * 1000; // Show 2-minute interactive countdown before logout
+const MIN_SESSION_GRACE_MS = 2 * 60 * 1000; // Never auto-logout within first 2 minutes of login
 
 interface PortalContextValue {
   user: User | null;
   authLoading: boolean;
+  profileLoading: boolean;
   dataLoading: boolean;
+  profileError: string | null;
+  syncWarning: string | null;
+  dismissSyncWarning: () => void;
+  retryProfileSync: () => Promise<void>;
   profile: UserProfile | null;
   organization: Organization | null;
   myOrganizations: Organization[];
   currentMember: OrganizationMember | null;
+  systemOwnerConfig: SystemOwnerConfig | null;
+  serverVerifiedSession: ServerVerifiedSession | null;
   effectiveRole: UserRole;
   effectiveCrmAccess: boolean;
   effectivePermissions: MemberPermissions;
   isSuperAdmin: boolean;
   isPlatformOwner: boolean;
+  isSystemOwner: boolean;
   isStudent: boolean;
   mustChangePassword: boolean;
   accountBlockedReason: 'inactive' | 'suspended' | null;
@@ -123,16 +146,35 @@ interface PortalContextValue {
 
 const PortalContext = createContext<PortalContextValue | null>(null);
 
+function resolveOwnerDisplayName(rawName?: string | null): string {
+  const clean = (rawName || '').trim();
+  if (
+    !clean ||
+    clean.toLowerCase() === SYSTEM_OWNER_EMAIL.toLowerCase() ||
+    clean === 'Zacma User' ||
+    clean === 'Zacma Super Admin'
+  ) {
+    return SYSTEM_OWNER_NAME;
+  }
+  return clean;
+}
+
 export function PortalProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [bootstrapReady, setBootstrapReady] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
   const [myOrganizations, setMyOrganizations] = useState<Organization[]>([]);
   const [members, setMembers] = useState<OrganizationMember[]>([]);
   const [ownMemberDoc, setOwnMemberDoc] = useState<OrganizationMember | null>(null);
+  const [systemOwnerConfig, setSystemOwnerConfig] = useState<SystemOwnerConfig | null>(null);
+  const [serverVerifiedSession, setServerVerifiedSession] = useState<ServerVerifiedSession | null>(null);
   const [loginActivity, setLoginActivity] = useState<LoginActivityRecord[]>([]);
   const [businessUnits, setBusinessUnits] = useState<BusinessUnit[]>([]);
   const [formsByUnit, setFormsByUnit] = useState<Record<string, DynamicForm[]>>({});
@@ -158,105 +200,150 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
   const [saasInvoices, setSaasInvoices] = useState<SaasInvoice[]>([]);
   const [saasSalesInquiries, setSaasSalesInquiries] = useState<SaasSalesInquiry[]>([]);
 
-  // Inactivity session guard
+  // Session guards & monotonic run counter (prevents stale async callbacks from clobbering state)
+  const authRunIdRef = useRef(0);
   const lastActivityAtRef = useRef<number>(Date.now());
+  const sessionStartedAtRef = useRef<number>(Date.now());
   const loggedSessionUidRef = useRef<string | null>(null);
   const [sessionWarningSeconds, setSessionWarningSeconds] = useState<number | null>(null);
 
-  const isBootstrapSuper = Boolean(
+  const isPrimaryOwnerEmail = Boolean(
     user?.email &&
       user.emailVerified &&
-      user.email.toLowerCase() === BOOTSTRAP_SUPER_ADMIN_EMAIL.toLowerCase()
+      user.email.toLowerCase() === SYSTEM_OWNER_EMAIL.toLowerCase()
   );
 
-  // 1. Auth state listener & first-login organization bootstrap
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
-      if (!firebaseUser) {
-        loggedSessionUidRef.current = null;
-        setSessionWarningSeconds(null);
-        setProfile(null);
-        setOrganization(null);
-        setMyOrganizations([]);
-        setMembers([]);
-        setOwnMemberDoc(null);
-        setLoginActivity([]);
-        setBusinessUnits([]);
-        setFormsByUnit({});
-        setSubmissions([]);
-        setLeads([]);
-        setTemplates([]);
-        setAuditLogs([]);
-        setIntegrations([]);
-        setNotifications([]);
-        setSupportConfig(null);
-        setCourses([]);
-        setKnowledgeItems([]);
-        setSupportConversations([]);
-        setStudentRegistrations([]);
-        setCurrentTenantSubscription(null);
-        setAllTenantSubscriptions([]);
-        setSaasInvoices([]);
-        setSaasSalesInquiries([]);
-        setAuthLoading(false);
-        return;
-      }
+  const isSystemOwner = Boolean(
+    isPrimaryOwnerEmail ||
+      (user?.emailVerified &&
+        systemOwnerConfig?.status === 'active' &&
+        systemOwnerConfig.ownerUid === user.uid) ||
+      (user?.emailVerified && serverVerifiedSession?.isSystemOwner === true)
+  );
 
+  const hydrateAuthenticatedSession = useCallback(
+    async (firebaseUser: User, runId: number) => {
       lastActivityAtRef.current = Date.now();
+      sessionStartedAtRef.current = Date.now();
+      setProfileLoading(true);
       setDataLoading(true);
-      try {
-        const userRef = doc(db, `users/${firebaseUser.uid}`);
-        const userSnap = await getDoc(userRef);
+      setBootstrapReady(false);
+      setProfileError(null);
 
-        const isBootstrap =
-          Boolean(firebaseUser.emailVerified) &&
-          firebaseUser.email?.toLowerCase() === BOOTSTRAP_SUPER_ADMIN_EMAIL.toLowerCase();
+      try {
+        // 1. Check permanent System Owner anchor in Firestore (if already initialized)
+        let ownerAnchor: SystemOwnerConfig | null = null;
+        try {
+          const anchorSnap = await getDoc(doc(db, 'platformConfig/systemOwner'));
+          if (anchorSnap.exists()) {
+            ownerAnchor = anchorSnap.data() as SystemOwnerConfig;
+            if (authRunIdRef.current === runId) {
+              setSystemOwnerConfig(ownerAnchor);
+            }
+          }
+        } catch {
+          // Non-fatal: continue with verified email check
+        }
+
+        const isOwner = Boolean(
+          firebaseUser.emailVerified &&
+            (firebaseUser.email?.toLowerCase() === SYSTEM_OWNER_EMAIL.toLowerCase() ||
+              (ownerAnchor?.status === 'active' && ownerAnchor.ownerUid === firebaseUser.uid))
+        );
 
         const isPasswordProvider = firebaseUser.providerData?.some(
           (p) => p.providerId === 'password'
         );
-
-        let orgId = DEFAULT_ORG_ID;
         const nowIso = new Date().toISOString();
 
+        // 2. Anchor permanent System Owner record for Zekimuluken (preserving existing account — zero duplicates)
+        if (isOwner) {
+          const syncedAnchor = await ensureSystemOwnerAnchor({
+            uid: firebaseUser.uid,
+            email: firebaseUser.email || SYSTEM_OWNER_EMAIL,
+          });
+          if (syncedAnchor && authRunIdRef.current === runId) {
+            setSystemOwnerConfig(syncedAnchor);
+          }
+        }
+
+        // 3. Retrieve or initialize the user's profile document
+        const userRef = doc(db, `users/${firebaseUser.uid}`);
+        const userSnap = await getDoc(userRef);
+        let orgId = DEFAULT_ORG_ID;
+        let resolvedProfile: UserProfile;
+
         if (!userSnap.exists()) {
-          const initialRole: UserRole = isBootstrap ? 'super_admin' : 'staff';
-          const initialCrmAccess = isBootstrap;
-          const newProfile: UserProfile = {
+          const initialRole: UserRole = isOwner ? 'super_admin' : 'staff';
+          resolvedProfile = {
             uid: firebaseUser.uid,
             email: firebaseUser.email || '',
-            displayName: firebaseUser.displayName || firebaseUser.email || 'Zacma User',
+            displayName: isOwner
+              ? SYSTEM_OWNER_NAME
+              : firebaseUser.displayName || firebaseUser.email || 'Zacma User',
             photoURL: firebaseUser.photoURL || '',
-            username: '',
+            username: isOwner ? 'zekimuluken' : '',
             phone: '',
             authProvider: isPasswordProvider ? 'username_password' : 'google',
             mustChangePassword: false,
             status: 'active',
+            isSystemOwner: isOwner,
+            accountType: isOwner ? 'primary_system_owner' : 'staff',
             lastLoginAt: nowIso,
             organizationId: orgId,
             role: initialRole,
-            crmAccess: initialCrmAccess,
+            crmAccess: isOwner,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           };
-          await setDoc(userRef, newProfile);
-          setProfile(newProfile);
+          await setDoc(userRef, resolvedProfile);
         } else {
           const existingProfile = userSnap.data() as UserProfile;
           orgId = existingProfile.organizationId || DEFAULT_ORG_ID;
-          setProfile(existingProfile);
-          // Stamp lastLoginAt cleanly
-          await updateDoc(userRef, {
-            lastLoginAt: nowIso,
-            updatedAt: serverTimestamp(),
-          }).catch(() => {});
+
+          if (isOwner) {
+            const ownerDisplayName = resolveOwnerDisplayName(existingProfile.displayName);
+            resolvedProfile = {
+              ...existingProfile,
+              displayName: ownerDisplayName,
+              role: 'super_admin',
+              crmAccess: true,
+              status: 'active',
+              isSystemOwner: true,
+              accountType: 'primary_system_owner',
+              mustChangePassword: false,
+              lastLoginAt: nowIso,
+            };
+            // Upgrade & lock Zekimuluken's existing user profile without creating any duplicate account
+            await updateDoc(userRef, {
+              displayName: ownerDisplayName,
+              role: 'super_admin',
+              crmAccess: true,
+              status: 'active',
+              isSystemOwner: true,
+              accountType: 'primary_system_owner',
+              mustChangePassword: false,
+              lastLoginAt: nowIso,
+              updatedAt: serverTimestamp(),
+            }).catch((err) => {
+              console.warn('Owner profile sync warning:', err instanceof Error ? err.message : err);
+            });
+          } else {
+            resolvedProfile = { ...existingProfile, lastLoginAt: nowIso };
+            await updateDoc(userRef, {
+              lastLoginAt: nowIso,
+              updatedAt: serverTimestamp(),
+            }).catch(() => {});
+          }
         }
 
-        // If bootstrapped Super Admin (Platform Owner), ensure root organization, plans, and 18 institute courses exist
-        if (isBootstrap) {
+        if (authRunIdRef.current !== runId) return;
+
+        // 4. For Primary System Owner (Zekimuluken), ensure root organization, owner member record, plans, AI support, and 18 courses exist
+        if (isOwner) {
           const rootOrgRef = doc(db, `organizations/${DEFAULT_ORG_ID}`);
           const rootOrgSnap = await getDoc(rootOrgRef);
+          const ownerDisplayName = resolveOwnerDisplayName(resolvedProfile.displayName);
 
           if (!rootOrgSnap.exists()) {
             const batch = writeBatch(db);
@@ -276,14 +363,17 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             batch.set(doc(db, `organizations/${DEFAULT_ORG_ID}/members/${firebaseUser.uid}`), {
               userId: firebaseUser.uid,
               organizationId: DEFAULT_ORG_ID,
-              email: firebaseUser.email || BOOTSTRAP_SUPER_ADMIN_EMAIL,
-              username: 'superadmin',
+              email: firebaseUser.email || SYSTEM_OWNER_EMAIL,
+              username: 'zekimuluken',
               phone: '',
-              displayName: firebaseUser.displayName || 'Zacma Super Admin',
+              displayName: ownerDisplayName,
               role: 'super_admin',
               crmAccess: true,
+              permissions: { ...DEFAULT_ROLE_PERMISSIONS.super_admin },
               authProvider: 'google',
               mustChangePassword: false,
+              isSystemOwner: true,
+              accountType: 'primary_system_owner',
               lastLoginAt: nowIso,
               assignedBusinessUnitIds: [],
               status: 'active',
@@ -364,107 +454,312 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             }
 
             await batch.commit();
+          } else {
+            // Existing root organization found: preserve all data and ensure Zekimuluken's owner member record is permanently active & protected
+            const rootOrgData = rootOrgSnap.data() as Organization;
+            const ownerMemberRef = doc(db, `organizations/${DEFAULT_ORG_ID}/members/${firebaseUser.uid}`);
+            const ownerMemberSnap = await getDoc(ownerMemberRef);
+            if (!ownerMemberSnap.exists()) {
+              await setDoc(ownerMemberRef, {
+                userId: firebaseUser.uid,
+                organizationId: DEFAULT_ORG_ID,
+                email: firebaseUser.email || SYSTEM_OWNER_EMAIL,
+                username: 'zekimuluken',
+                phone: '',
+                displayName: ownerDisplayName,
+                role: 'super_admin',
+                crmAccess: true,
+                permissions: { ...DEFAULT_ROLE_PERMISSIONS.super_admin },
+                authProvider: 'google',
+                mustChangePassword: false,
+                isSystemOwner: true,
+                accountType: 'primary_system_owner',
+                lastLoginAt: nowIso,
+                assignedBusinessUnitIds: [],
+                status: 'active',
+                ownerId: rootOrgData.ownerId || firebaseUser.uid,
+                authorizedUserIds: Array.from(
+                  new Set([...(rootOrgData.authorizedUserIds || []), firebaseUser.uid])
+                ),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              }).catch(() => {});
+            } else {
+              await updateDoc(ownerMemberRef, {
+                displayName: ownerDisplayName,
+                role: 'super_admin',
+                crmAccess: true,
+                permissions: { ...DEFAULT_ROLE_PERMISSIONS.super_admin },
+                isSystemOwner: true,
+                accountType: 'primary_system_owner',
+                status: 'active',
+                mustChangePassword: false,
+                lastLoginAt: nowIso,
+                updatedAt: serverTimestamp(),
+              }).catch(() => {});
+            }
           }
 
-          // Seed SaaS Commercial Plans & Root Tenant record
-          await seedDefaultSaasPlans();
-          await ensureRootTenantSubscription({
-            organizationId: DEFAULT_ORG_ID,
-            organizationName: 'Zacma Technology',
-            organizationSlug: 'zacma',
-            ownerId: firebaseUser.uid,
-            ownerName: firebaseUser.displayName || 'Zacma Super Admin',
-            ownerEmail: firebaseUser.email || BOOTSTRAP_SUPER_ADMIN_EMAIL,
-          });
+          // Non-blocking background seeding (errors here must NEVER block login or trigger logout)
+          void (async () => {
+            try {
+              await seedDefaultSaasPlans();
+              await ensureRootTenantSubscription({
+                organizationId: DEFAULT_ORG_ID,
+                organizationName: 'Zacma Technology',
+                organizationSlug: 'zacma',
+                ownerId: firebaseUser.uid,
+                ownerName: ownerDisplayName,
+                ownerEmail: firebaseUser.email || SYSTEM_OWNER_EMAIL,
+              });
 
-          // Ensure Section 8 AI Customer Support configuration exists for Zacma HQ
-          const supportRef = doc(db, `publicSupport/${DEFAULT_ORG_ID}`);
-          const supportSnap = await getDoc(supportRef);
-          if (!supportSnap.exists()) {
-            await setDoc(supportRef, {
-              organizationId: DEFAULT_ORG_ID,
-              isActive: true,
-              assistantName: 'ZACMA AI ASSISTANT',
-              welcomeMessage: DEFAULT_SUPPORT_WELCOME_MESSAGE,
-              aiInstructions: DEFAULT_SUPPORT_AI_INSTRUCTIONS,
-              supportedLanguages: ['en', 'am'],
-              trainingInstituteBuId: '',
-              trainingInstituteName: 'Zacma Technology Training Institute',
-              registrationFormUrl: '',
-              orgOwnerId: firebaseUser.uid,
-              updatedAt: serverTimestamp(),
-            });
-          }
+              const supportRef = doc(db, `publicSupport/${DEFAULT_ORG_ID}`);
+              const supportSnap = await getDoc(supportRef);
+              if (!supportSnap.exists()) {
+                await setDoc(supportRef, {
+                  organizationId: DEFAULT_ORG_ID,
+                  isActive: true,
+                  assistantName: 'ZACMA AI ASSISTANT',
+                  welcomeMessage: DEFAULT_SUPPORT_WELCOME_MESSAGE,
+                  aiInstructions: DEFAULT_SUPPORT_AI_INSTRUCTIONS,
+                  supportedLanguages: ['en', 'am'],
+                  trainingInstituteBuId: '',
+                  trainingInstituteName: 'Zacma Technology Training Institute',
+                  registrationFormUrl: '',
+                  orgOwnerId: firebaseUser.uid,
+                  updatedAt: serverTimestamp(),
+                });
+              }
 
-          // Ensure all 18 administrator-approved Zacma Training Institute courses (8,500 ETB each) exist in Zacma HQ
-          const existingCoursesSnap = await getDocs(
-            query(collection(db, 'publicCourses'), where('organizationId', '==', DEFAULT_ORG_ID))
-          );
-          const existingCoursesList = existingCoursesSnap.docs.map(
-            (d) => d.data() as TrainingCourse
-          );
-          await seedEighteenInstituteCourses({
-            organizationId: DEFAULT_ORG_ID,
-            ownerId: firebaseUser.uid,
-            authorizedUserIds: [firebaseUser.uid],
-            existingCourses: existingCoursesList,
-            actorId: firebaseUser.uid,
-            actorName: firebaseUser.displayName || 'Zacma Super Admin',
-            skipAudit: true,
-          });
+              const existingCoursesSnap = await getDocs(
+                query(collection(db, 'publicCourses'), where('organizationId', '==', DEFAULT_ORG_ID))
+              );
+              const existingCoursesList = existingCoursesSnap.docs.map(
+                (d) => d.data() as TrainingCourse
+              );
+              await seedEighteenInstituteCourses({
+                organizationId: DEFAULT_ORG_ID,
+                ownerId: firebaseUser.uid,
+                authorizedUserIds: [firebaseUser.uid],
+                existingCourses: existingCoursesList,
+                actorId: firebaseUser.uid,
+                actorName: ownerDisplayName,
+                skipAudit: true,
+              });
+            } catch (seedErr) {
+              console.warn('Non-blocking owner bootstrap warning:', seedErr);
+            }
+          })();
         }
+
+        // 5. Pre-fetch active organization & own member record BEFORE releasing loading gate
+        // so AuthGate NEVER flashes "No organization" or redirects while data is still loading!
+        const [orgSnap, memberSnap] = await Promise.all([
+          getDoc(doc(db, `organizations/${orgId}`)).catch(() => null),
+          getDoc(doc(db, `organizations/${orgId}/members/${firebaseUser.uid}`)).catch(() => null),
+        ]);
+
+        if (authRunIdRef.current !== runId) return;
+
+        setProfile(resolvedProfile);
+        setOrganization(orgSnap && orgSnap.exists() ? (orgSnap.data() as Organization) : null);
+        setOwnMemberDoc(
+          memberSnap && memberSnap.exists() ? (memberSnap.data() as OrganizationMember) : null
+        );
+        setBootstrapReady(true);
+
+        // 6. Verify session with backend server asynchronously (non-blocking, never triggers logout)
+        void verifySessionWithServer().then((verified) => {
+          if (authRunIdRef.current === runId && verified) {
+            setServerVerifiedSession(verified);
+          }
+        });
       } catch (error) {
-        console.error('Bootstrap error:', error);
+        console.error('Session hydration warning (session preserved):', error);
+        if (authRunIdRef.current !== runId) return;
+
+        // CRITICAL: NEVER log the user out because of temporary database failures or delayed profile retrieval!
+        const isOwnerFallback = Boolean(
+          firebaseUser.emailVerified &&
+            firebaseUser.email?.toLowerCase() === SYSTEM_OWNER_EMAIL.toLowerCase()
+        );
+        setProfileError(
+          error instanceof Error
+            ? `Temporary database sync issue (${error.message}). Your session remains active — click Retry Sync.`
+            : 'Temporary database sync issue. Your session remains active — click Retry Sync.'
+        );
+
+        // Provide a safe in-memory fallback profile so the System Owner is never locked out during a transient glitch
+        if (isOwnerFallback) {
+          setProfile((prev) =>
+            prev || {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email || SYSTEM_OWNER_EMAIL,
+              displayName: SYSTEM_OWNER_NAME,
+              photoURL: firebaseUser.photoURL || '',
+              username: 'zekimuluken',
+              authProvider: 'google',
+              mustChangePassword: false,
+              status: 'active',
+              isSystemOwner: true,
+              accountType: 'primary_system_owner',
+              organizationId: DEFAULT_ORG_ID,
+              role: 'super_admin',
+              crmAccess: true,
+              createdAt: null,
+              updatedAt: null,
+            }
+          );
+          setBootstrapReady(true);
+        }
       } finally {
-        setAuthLoading(false);
-        setDataLoading(false);
+        if (authRunIdRef.current === runId) {
+          setAuthLoading(false);
+          setProfileLoading(false);
+          setDataLoading(false);
+        }
       }
-    });
+    },
+    []
+  );
 
-    return () => unsub();
-  }, []);
-
-  // 1b. Live UserProfile listener so workspace switches & role updates reflect immediately
+  // 1. Auth state initialization (awaits authStateReady + redirect result before releasing loading state)
   useEffect(() => {
-    if (!user) return;
-    const unsub = onSnapshot(
+    let active = true;
+    let unsubscribe: (() => void) | null = null;
+
+    const initAuth = async () => {
+      try {
+        // Safely settle any pending OAuth redirect result & wait for Firebase persistent storage hydration
+        await getRedirectResult(auth).catch(() => null);
+        await auth.authStateReady();
+      } catch (err) {
+        console.warn('Auth readiness notice:', err instanceof Error ? err.message : err);
+      }
+
+      if (!active) return;
+
+      unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+        if (!active) return;
+        const runId = ++authRunIdRef.current;
+
+        if (!firebaseUser) {
+          loggedSessionUidRef.current = null;
+          setSessionWarningSeconds(null);
+          setUser(null);
+          setProfile(null);
+          setOrganization(null);
+          setMyOrganizations([]);
+          setMembers([]);
+          setOwnMemberDoc(null);
+          setSystemOwnerConfig(null);
+          setServerVerifiedSession(null);
+          setLoginActivity([]);
+          setBusinessUnits([]);
+          setFormsByUnit({});
+          setSubmissions([]);
+          setLeads([]);
+          setTemplates([]);
+          setAuditLogs([]);
+          setIntegrations([]);
+          setNotifications([]);
+          setSupportConfig(null);
+          setCourses([]);
+          setKnowledgeItems([]);
+          setSupportConversations([]);
+          setStudentRegistrations([]);
+          setCurrentTenantSubscription(null);
+          setAllTenantSubscriptions([]);
+          setSaasInvoices([]);
+          setSaasSalesInquiries([]);
+          setBootstrapReady(false);
+          setProfileError(null);
+          setProfileLoading(false);
+          setDataLoading(false);
+          setAuthLoading(false);
+          return;
+        }
+
+        // Set user & immediately mark profileLoading = true BEFORE releasing render
+        // so AuthGate NEVER flashes onboarding or redirects while profile loads!
+        setProfileLoading(true);
+        setUser(firebaseUser);
+        await hydrateAuthenticatedSession(firebaseUser, runId);
+      });
+    };
+
+    void initAuth();
+
+    return () => {
+      active = false;
+      if (unsubscribe) unsubscribe();
+    };
+  }, [hydrateAuthenticatedSession]);
+
+  const retryProfileSync = useCallback(async () => {
+    if (!auth.currentUser) return;
+    const runId = ++authRunIdRef.current;
+    await hydrateAuthenticatedSession(auth.currentUser, runId);
+  }, [hydrateAuthenticatedSession]);
+
+  // 1b. Live UserProfile & SystemOwnerConfig listeners (only after bootstrapReady)
+  useEffect(() => {
+    if (!user || !bootstrapReady) return;
+    const unsubProfile = onSnapshot(
       doc(db, `users/${user.uid}`),
       (snap) => {
         if (snap.exists()) {
           setProfile(snap.data() as UserProfile);
+          setProfileError(null);
         }
       },
       (err) => {
-        console.warn('User profile listener warning:', err.message);
+        logFirestoreListenerError(err, OperationType.GET, `users/${user.uid}`);
       }
     );
-    return () => unsub();
-  }, [user]);
+
+    const unsubOwner = onSnapshot(
+      doc(db, 'platformConfig/systemOwner'),
+      (snap) => {
+        if (snap.exists()) {
+          setSystemOwnerConfig(snap.data() as SystemOwnerConfig);
+        }
+      },
+      () => {
+        // Non-fatal
+      }
+    );
+
+    return () => {
+      unsubProfile();
+      unsubOwner();
+    };
+  }, [user, bootstrapReady]);
 
   const orgId = profile?.organizationId || DEFAULT_ORG_ID;
-  const isStudentProfile = !isBootstrapSuper && profile?.role === 'student';
+  const isStudentProfile = !isSystemOwner && profile?.role === 'student';
 
   // 1c. Live Own Member Document listener (works for all roles including students)
   useEffect(() => {
-    if (!user || !profile) return;
+    if (!user || !profile || !bootstrapReady) return;
     const unsub = onSnapshot(
       doc(db, `organizations/${orgId}/members/${user.uid}`),
       (snap) => {
         setOwnMemberDoc(snap.exists() ? (snap.data() as OrganizationMember) : null);
       },
-      () => {
-        setOwnMemberDoc(null);
+      (err) => {
+        logFirestoreListenerError(err, OperationType.GET, `organizations/${orgId}/members/${user.uid}`);
       }
     );
     return () => unsub();
-  }, [user, profile?.organizationId, orgId]);
+  }, [user, profile?.organizationId, orgId, bootstrapReady]);
 
   // 1d. Global SaaS Plans, Owned Organizations, Tenant Subscriptions, Invoices & Sales Inquiries listeners
   useEffect(() => {
-    if (!user || isStudentProfile) return;
+    if (!user || !bootstrapReady || isStudentProfile) return;
     const unsubs: Array<() => void> = [];
 
-    const plansQuery = isBootstrapSuper
+    const plansQuery = isSystemOwner
       ? collection(db, 'saasPlans')
       : query(collection(db, 'saasPlans'), where('isActive', '==', true));
     unsubs.push(
@@ -478,11 +773,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             setSaasPlans(list);
           }
         },
-        (err) => console.warn('SaaS plans read skipped:', err.message)
+        (err) => logFirestoreListenerError(err, OperationType.LIST, 'saasPlans')
       )
     );
 
-    const orgsQuery = isBootstrapSuper
+    const orgsQuery = isSystemOwner
       ? collection(db, 'organizations')
       : query(collection(db, 'organizations'), where('authorizedUserIds', 'array-contains', user.uid));
     unsubs.push(
@@ -494,11 +789,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => a.name.localeCompare(b.name));
           setMyOrganizations(list);
         },
-        (err) => console.warn('Organizations list skipped:', err.message)
+        (err) => logFirestoreListenerError(err, OperationType.LIST, 'organizations')
       )
     );
 
-    const tenantsQuery = isBootstrapSuper
+    const tenantsQuery = isSystemOwner
       ? collection(db, 'saasTenants')
       : query(collection(db, 'saasTenants'), where('authorizedUserIds', 'array-contains', user.uid));
     unsubs.push(
@@ -510,11 +805,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setAllTenantSubscriptions(list);
         },
-        (err) => console.warn('Tenant subscriptions skipped:', err.message)
+        (err) => logFirestoreListenerError(err, OperationType.LIST, 'saasTenants')
       )
     );
 
-    const invoicesQuery = isBootstrapSuper
+    const invoicesQuery = isSystemOwner
       ? collection(db, 'saasInvoices')
       : query(collection(db, 'saasInvoices'), where('ownerId', '==', user.uid));
     unsubs.push(
@@ -526,11 +821,11 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setSaasInvoices(list);
         },
-        (err) => console.warn('SaaS invoices skipped:', err.message)
+        (err) => logFirestoreListenerError(err, OperationType.LIST, 'saasInvoices')
       )
     );
 
-    if (isBootstrapSuper) {
+    if (isSystemOwner) {
       unsubs.push(
         onSnapshot(
           collection(db, 'saasSalesInquiries'),
@@ -540,7 +835,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
             setSaasSalesInquiries(list);
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'saasSalesInquiries')
+          (err) => logFirestoreListenerError(err, OperationType.LIST, 'saasSalesInquiries')
         )
       );
     } else {
@@ -550,13 +845,17 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, isBootstrapSuper, isStudentProfile]);
+  }, [user, bootstrapReady, isSystemOwner, isStudentProfile]);
 
   // 2. Real-time Firestore listeners scoped strictly to the active organization & role
   useEffect(() => {
-    if (!user || !profile) return;
+    if (!user || !profile || !bootstrapReady) return;
 
     const unsubs: Array<() => void> = [];
+
+    const safeListenerError = (path: string) => (err: unknown) => {
+      logFirestoreListenerError(err, OperationType.LIST, path);
+    };
 
     // Active Organization doc (allowed for both active staff and active students)
     unsubs.push(
@@ -566,8 +865,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           setOrganization(snap.exists() ? (snap.data() as Organization) : null);
         },
         (err) => {
-          console.warn('Org read skipped:', err.message);
-          setOrganization(null);
+          logFirestoreListenerError(err, OperationType.GET, `organizations/${orgId}`);
         }
       )
     );
@@ -599,7 +897,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
             setStudentRegistrations(list);
           },
-          (err) => console.warn('Student registrations read skipped:', err.message)
+          safeListenerError(`organizations/${orgId}/studentRegistrations`)
         )
       );
 
@@ -616,7 +914,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               .sort((a, b) => a.title.localeCompare(b.title));
             setCourses(list);
           },
-          (err) => console.warn('Student courses read skipped:', err.message)
+          safeListenerError('publicCourses')
         )
       );
 
@@ -632,7 +930,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
             setLoginActivity(list);
           },
-          (err) => console.warn('Student login activity skipped:', err.message)
+          safeListenerError(`organizations/${orgId}/loginActivity`)
         )
       );
 
@@ -643,7 +941,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
 
     const makeQuery = (colPath: string) => {
       const ref = collection(db, colPath);
-      return isBootstrapSuper
+      return isSystemOwner
         ? ref
         : query(ref, where('authorizedUserIds', 'array-contains', user.uid));
     };
@@ -670,7 +968,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         (snap) => {
           setMembers(snap.docs.map((d) => d.data() as OrganizationMember));
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/members`)
+        safeListenerError(`organizations/${orgId}/members`)
       )
     );
 
@@ -684,7 +982,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setLoginActivity(list);
         },
-        (err) => console.warn('Login activity read skipped:', err.message)
+        safeListenerError(`organizations/${orgId}/loginActivity`)
       )
     );
 
@@ -698,7 +996,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setBusinessUnits(list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/businessUnits`)
+        safeListenerError(`organizations/${orgId}/businessUnits`)
       )
     );
 
@@ -712,7 +1010,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setLeads(list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/leads`)
+        safeListenerError(`organizations/${orgId}/leads`)
       )
     );
 
@@ -726,7 +1024,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setSubmissions(list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/formSubmissions`)
+        safeListenerError(`organizations/${orgId}/formSubmissions`)
       )
     );
 
@@ -737,7 +1035,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         (snap) => {
           setTemplates(snap.docs.map((d) => d.data() as MessageTemplate));
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/messageTemplates`)
+        safeListenerError(`organizations/${orgId}/messageTemplates`)
       )
     );
 
@@ -751,7 +1049,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setAuditLogs(list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/auditLogs`)
+        safeListenerError(`organizations/${orgId}/auditLogs`)
       )
     );
 
@@ -762,7 +1060,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         (snap) => {
           setIntegrations(snap.docs.map((d) => d.data() as IntegrationConfig));
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/integrations`)
+        safeListenerError(`organizations/${orgId}/integrations`)
       )
     );
 
@@ -776,7 +1074,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setNotifications(list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/notifications`)
+        safeListenerError(`organizations/${orgId}/notifications`)
       )
     );
 
@@ -788,14 +1086,13 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
           setSupportConfig(snap.exists() ? (snap.data() as PublicSupportConfig) : null);
         },
         (err) => {
-          console.warn('Public support config read skipped:', err.message);
-          setSupportConfig(null);
+          logFirestoreListenerError(err, OperationType.GET, `publicSupport/${orgId}`);
         }
       )
     );
 
     // Section 8: Courses Catalog scoped to active org
-    const coursesQuery = isBootstrapSuper
+    const coursesQuery = isSystemOwner
       ? query(collection(db, 'publicCourses'), where('organizationId', '==', orgId))
       : query(
           collection(db, 'publicCourses'),
@@ -811,12 +1108,12 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => a.title.localeCompare(b.title));
           setCourses(list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'publicCourses')
+        safeListenerError('publicCourses')
       )
     );
 
     // Section 8: Support Knowledge & FAQs scoped to active org
-    const faqsQuery = isBootstrapSuper
+    const faqsQuery = isSystemOwner
       ? query(collection(db, 'publicFaqs'), where('organizationId', '==', orgId))
       : query(
           collection(db, 'publicFaqs'),
@@ -832,7 +1129,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.updatedAt) - timestampToMillis(a.updatedAt));
           setKnowledgeItems(list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'publicFaqs')
+        safeListenerError('publicFaqs')
       )
     );
 
@@ -846,8 +1143,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.updatedAt) - timestampToMillis(a.updatedAt));
           setSupportConversations(list);
         },
-        (err) =>
-          handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/supportConversations`)
+        safeListenerError(`organizations/${orgId}/supportConversations`)
       )
     );
 
@@ -861,19 +1157,18 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
             .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
           setStudentRegistrations(list);
         },
-        (err) =>
-          handleFirestoreError(err, OperationType.LIST, `organizations/${orgId}/studentRegistrations`)
+        safeListenerError(`organizations/${orgId}/studentRegistrations`)
       )
     );
 
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, profile?.organizationId, orgId, isBootstrapSuper, isStudentProfile]);
+  }, [user, profile?.organizationId, orgId, bootstrapReady, isSystemOwner, isStudentProfile]);
 
   // 3. Per-Business-Unit dynamic forms listeners
   useEffect(() => {
-    if (!user || !profile || isStudentProfile || businessUnits.length === 0) {
+    if (!user || !profile || !bootstrapReady || isStudentProfile || businessUnits.length === 0) {
       setFormsByUnit({});
       return;
     }
@@ -882,7 +1177,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     for (const bu of businessUnits) {
       const colPath = `organizations/${orgId}/businessUnits/${bu.id}/forms`;
       const ref = collection(db, colPath);
-      const q = isBootstrapSuper
+      const q = isSystemOwner
         ? ref
         : query(ref, where('authorizedUserIds', 'array-contains', user.uid));
 
@@ -895,7 +1190,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
               .sort((a, b) => timestampToMillis(b.createdAt) - timestampToMillis(a.createdAt));
             setFormsByUnit((prev) => ({ ...prev, [bu.id]: unitForms }));
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, colPath)
+          (err) => logFirestoreListenerError(err, OperationType.LIST, colPath)
         )
       );
     }
@@ -903,7 +1198,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     return () => {
       unsubs.forEach((fn) => fn());
     };
-  }, [user, profile?.organizationId, orgId, businessUnits, isBootstrapSuper, isStudentProfile]);
+  }, [user, profile?.organizationId, orgId, businessUnits, bootstrapReady, isSystemOwner, isStudentProfile]);
 
   const forms = useMemo(() => {
     const unitIds = new Set(businessUnits.map((b) => b.id));
@@ -925,41 +1220,41 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     );
   }, [ownMemberDoc, members, user]);
 
-  const effectiveRole: UserRole = isBootstrapSuper
+  const effectiveRole: UserRole = isSystemOwner
     ? 'super_admin'
     : currentMember?.role || profile?.role || 'staff';
 
   const effectivePermissions = useMemo(
     () =>
-      isBootstrapSuper
+      isSystemOwner
         ? resolveEffectivePermissions('super_admin')
         : resolveEffectivePermissions(
             effectiveRole,
             currentMember?.permissions,
             currentMember?.crmAccess ?? profile?.crmAccess
           ),
-    [isBootstrapSuper, effectiveRole, currentMember, profile?.crmAccess]
+    [isSystemOwner, effectiveRole, currentMember, profile?.crmAccess]
   );
 
   const effectiveCrmAccess = effectivePermissions.crm;
   const isStudent = effectiveRole === 'student';
 
   const accountBlockedReason: 'inactive' | 'suspended' | null = useMemo(() => {
-    if (isBootstrapSuper) return null;
+    if (isSystemOwner) return null;
     const status = currentMember?.status || profile?.status;
     if (status === 'suspended') return 'suspended';
     if (status === 'inactive') return 'inactive';
     return null;
-  }, [isBootstrapSuper, currentMember?.status, profile?.status]);
+  }, [isSystemOwner, currentMember?.status, profile?.status]);
 
   const mustChangePassword = useMemo(() => {
-    if (isBootstrapSuper) return false;
+    if (isSystemOwner) return false;
     return Boolean(currentMember?.mustChangePassword || profile?.mustChangePassword);
-  }, [isBootstrapSuper, currentMember?.mustChangePassword, profile?.mustChangePassword]);
+  }, [isSystemOwner, currentMember?.mustChangePassword, profile?.mustChangePassword]);
 
   const subscriptionPolicy = useMemo(
-    () => computeSubscriptionPolicy(currentTenantSubscription, isBootstrapSuper),
-    [currentTenantSubscription, isBootstrapSuper]
+    () => computeSubscriptionPolicy(currentTenantSubscription, isSystemOwner),
+    [currentTenantSubscription, isSystemOwner]
   );
 
   const duplicateLeadMap = useMemo(() => {
@@ -968,7 +1263,7 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
 
   // Record immutable login event once per authenticated session & organization
   useEffect(() => {
-    if (!user || !organization || !profile || accountBlockedReason) return;
+    if (!user || !organization || !profile || !bootstrapReady || accountBlockedReason) return;
     const sessionKey = `${user.uid}:${organization.id}`;
     if (loggedSessionUidRef.current === sessionKey) return;
     loggedSessionUidRef.current = sessionKey;
@@ -981,20 +1276,21 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       userId: user.uid,
       username: currentMember?.username || profile.username || '',
       email: user.email || profile.email || '',
-      displayName: currentMember?.displayName || profile.displayName || user.displayName || 'User',
+      displayName: isSystemOwner
+        ? resolveOwnerDisplayName(currentMember?.displayName || profile.displayName)
+        : currentMember?.displayName || profile.displayName || user.displayName || 'User',
       role: effectiveRole,
       authMethod: isPasswordAuth ? 'username_password' : 'google',
       eventType: 'login',
     });
 
-    // Stamp lastLoginAt on member doc
     if (currentMember) {
       void updateDoc(doc(db, `organizations/${organization.id}/members/${user.uid}`), {
         lastLoginAt: new Date().toISOString(),
         updatedAt: serverTimestamp(),
       }).catch(() => {});
     }
-  }, [user, organization, profile, currentMember, effectiveRole, accountBlockedReason]);
+  }, [user, organization, profile, currentMember, effectiveRole, accountBlockedReason, bootstrapReady, isSystemOwner]);
 
   const logout = useCallback(async () => {
     if (user && organization && profile) {
@@ -1006,17 +1302,25 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         userId: user.uid,
         username: currentMember?.username || profile.username || '',
         email: user.email || profile.email || '',
-        displayName: currentMember?.displayName || profile.displayName || user.displayName || 'User',
+        displayName: isSystemOwner
+          ? resolveOwnerDisplayName(currentMember?.displayName || profile.displayName)
+          : currentMember?.displayName || profile.displayName || user.displayName || 'User',
         role: effectiveRole,
         authMethod: isPasswordAuth ? 'username_password' : 'google',
         eventType: 'logout',
-      });
+      }).catch(() => {});
     }
     setSessionWarningSeconds(null);
     await signOut(auth);
-  }, [user, organization, profile, currentMember, effectiveRole]);
+  }, [user, organization, profile, currentMember, effectiveRole, isSystemOwner]);
 
-  // 4. Session inactivity timeout guard (60 min auto-logout with 2 min warning)
+  // Keep a stable ref to logout so the idle timer never tears down on profile/org snapshot updates
+  const logoutRef = useRef(logout);
+  useEffect(() => {
+    logoutRef.current = logout;
+  }, [logout]);
+
+  // 4. Hardened session inactivity timeout guard (4 hours genuine idle; NEVER logs out immediately after login)
   const extendSession = useCallback(() => {
     lastActivityAtRef.current = Date.now();
     setSessionWarningSeconds(null);
@@ -1024,37 +1328,72 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!user) return;
+    // Always reset clocks when a user session becomes active
+    lastActivityAtRef.current = Date.now();
+    sessionStartedAtRef.current = Date.now();
+    setSessionWarningSeconds(null);
+
     const touch = () => {
       lastActivityAtRef.current = Date.now();
       setSessionWarningSeconds((prev) => (prev !== null ? null : prev));
     };
 
-    const events: Array<keyof WindowEventMap> = ['mousedown', 'keydown', 'scroll', 'touchstart'];
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        const idleMs = Date.now() - lastActivityAtRef.current;
+        // If laptop slept past timeout, give user a 60-second warning banner instead of instant silent logout
+        if (idleMs >= IDLE_TIMEOUT_MS - IDLE_WARNING_MS) {
+          lastActivityAtRef.current = Date.now() - (IDLE_TIMEOUT_MS - 60_000);
+          setSessionWarningSeconds(60);
+        }
+      }
+    };
+
+    const events: Array<keyof WindowEventMap> = [
+      'mousedown',
+      'pointerdown',
+      'keydown',
+      'scroll',
+      'touchstart',
+    ];
     events.forEach((ev) => window.addEventListener(ev, touch, { passive: true }));
+    document.addEventListener('visibilitychange', handleVisibility);
 
     const timer = window.setInterval(() => {
-      const idleMs = Date.now() - lastActivityAtRef.current;
+      const now = Date.now();
+      const sessionAgeMs = now - sessionStartedAtRef.current;
+      // Grace guard: never auto-logout during initial 2 minutes of login
+      if (sessionAgeMs < MIN_SESSION_GRACE_MS) {
+        return;
+      }
+
+      const idleMs = now - lastActivityAtRef.current;
       const remainingMs = IDLE_TIMEOUT_MS - idleMs;
       if (remainingMs <= 0) {
-        void logout();
+        void logoutRef.current();
       } else if (remainingMs <= IDLE_WARNING_MS) {
         setSessionWarningSeconds(Math.ceil(remainingMs / 1000));
       } else {
-        setSessionWarningSeconds(null);
+        setSessionWarningSeconds((prev) => (prev !== null ? null : prev));
       }
     }, 10_000);
 
     return () => {
       events.forEach((ev) => window.removeEventListener(ev, touch));
+      document.removeEventListener('visibilitychange', handleVisibility);
       window.clearInterval(timer);
     };
-  }, [user, logout]);
+  }, [user?.uid]);
 
   const signInWithGoogle = async () => {
+    lastActivityAtRef.current = Date.now();
+    sessionStartedAtRef.current = Date.now();
     await signInWithPopup(auth, googleProvider);
   };
 
   const signInWithUsername = async (identifier: string, password: string) => {
+    lastActivityAtRef.current = Date.now();
+    sessionStartedAtRef.current = Date.now();
     await loginWithUsernameAndPassword(identifier, password);
   };
 
@@ -1083,7 +1422,9 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     if (!user) return;
     await switchActiveOrganization({
       uid: user.uid,
-      displayName: user.displayName || user.email || 'Workspace User',
+      displayName: isSystemOwner
+        ? SYSTEM_OWNER_NAME
+        : user.displayName || user.email || 'Workspace User',
       photoURL: user.photoURL || '',
       targetOrganizationId: targetOrgId,
     });
@@ -1094,16 +1435,24 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
       value={{
         user,
         authLoading,
+        profileLoading,
         dataLoading,
+        profileError,
+        syncWarning,
+        dismissSyncWarning: () => setSyncWarning(null),
+        retryProfileSync,
         profile,
         organization,
         myOrganizations,
         currentMember,
+        systemOwnerConfig,
+        serverVerifiedSession,
         effectiveRole,
         effectiveCrmAccess,
         effectivePermissions,
-        isSuperAdmin: effectiveRole === 'super_admin',
-        isPlatformOwner: isBootstrapSuper,
+        isSuperAdmin: effectiveRole === 'super_admin' || isSystemOwner,
+        isPlatformOwner: isSystemOwner,
+        isSystemOwner,
         isStudent,
         mustChangePassword,
         accountBlockedReason,

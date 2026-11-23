@@ -14,6 +14,8 @@
         "authProvider": { "type": "string", "enum": ["google", "username_password"] },
         "mustChangePassword": { "type": "boolean" },
         "status": { "type": "string", "enum": ["active", "inactive", "suspended"] },
+        "isSystemOwner": { "type": "boolean" },
+        "accountType": { "type": "string", "enum": ["primary_system_owner", "tenant_admin", "staff", "student"] },
         "lastLoginAt": { "type": "string", "maxLength": 50 },
         "organizationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "role": { "type": "string", "enum": ["super_admin", "org_admin", "bu_manager", "staff", "accountant", "instructor", "student"] },
@@ -22,6 +24,26 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "displayName", "organizationId", "role", "crmAccess", "createdAt", "updatedAt"]
+    },
+    "SystemOwnerConfig": {
+      "title": "SystemOwnerConfig",
+      "description": "Tamper-proof platform ownership anchor binding the permanent Primary System Owner (Zekimuluken).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "enum": ["systemOwner"] },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerEmail": { "type": "string", "format": "email", "maxLength": 200 },
+        "ownerName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "accountType": { "type": "string", "enum": ["primary_system_owner"] },
+        "role": { "type": "string", "enum": ["super_admin"] },
+        "status": { "type": "string", "enum": ["active"] },
+        "protected": { "type": "boolean" },
+        "transferCount": { "type": "number" },
+        "lastVerifiedAt": { "type": "string", "maxLength": 50 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "ownerEmail", "ownerName", "accountType", "role", "status", "protected", "transferCount", "lastVerifiedAt", "createdAt", "updatedAt"]
     },
     "Organization": {
       "title": "Organization",
@@ -57,6 +79,8 @@
         "permissions": { "type": "object" },
         "authProvider": { "type": "string", "enum": ["google", "username_password"] },
         "mustChangePassword": { "type": "boolean" },
+        "isSystemOwner": { "type": "boolean" },
+        "accountType": { "type": "string", "enum": ["primary_system_owner", "tenant_admin", "staff", "student"] },
         "lastLoginAt": { "type": "string", "maxLength": 50 },
         "assignedBusinessUnitIds": { "type": "array" },
         "status": { "type": "string", "enum": ["active", "inactive", "invited", "suspended"] },
@@ -628,6 +652,10 @@
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "User profile and default organization reference (PII isolated to owner, Tenant Admin, or Super Admin)."
+    },
+    "/platformConfig/{configId}": {
+      "schema": { "$ref": "#/entities/SystemOwnerConfig" },
+      "description": "Protected platform-level system configuration anchoring the permanent Primary System Owner (Zekimuluken)."
     },
     "/usernameLookup/{username}": {
       "schema": { "$ref": "#/entities/UsernameLookup" },

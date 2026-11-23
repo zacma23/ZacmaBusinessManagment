@@ -42,9 +42,13 @@ export function AuthGate({ children, onOpenStorefront }: AuthGateProps) {
   const {
     user,
     authLoading,
+    profileLoading,
+    profileError,
+    retryProfileSync,
     profile,
     organization,
     isSuperAdmin,
+    isSystemOwner,
     isStudent,
     mustChangePassword,
     accountBlockedReason,
@@ -98,14 +102,21 @@ export function AuthGate({ children, onOpenStorefront }: AuthGateProps) {
     setTimeout(() => setCopiedDomain(false), 2000);
   };
 
-  if (authLoading) {
+  // Never redirect to login or onboarding while Firebase Auth is initializing OR
+  // while the signed-in user's profile, roles, and organization are still loading.
+  if (authLoading || (Boolean(user) && profileLoading)) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="flex flex-col items-center gap-3">
+        <div className="flex flex-col items-center gap-3 text-center">
           <div className="w-10 h-10 rounded-lg bg-blue-700 text-white font-display font-bold text-lg flex items-center justify-center">
             Z
           </div>
-          <p className="text-sm font-medium text-slate-600">Loading Zacma SaaS Portal…</p>
+          <p className="text-sm font-semibold text-slate-800">
+            {user ? 'Verifying your profile & workspace permissions…' : 'Restoring your Zacma session…'}
+          </p>
+          <p className="text-xs text-slate-500">
+            Persistent session check in progress — please wait a moment.
+          </p>
         </div>
       </div>
     );
@@ -745,9 +756,48 @@ export function AuthGate({ children, onOpenStorefront }: AuthGateProps) {
   }
 
   // =========================================================================
+  // 3b. TRANSIENT DATABASE RECOVERY (NEVER AUTO-LOGOUT ON TEMPORARY DB FAILURE)
+  // =========================================================================
+  if (profileError && !profile && !isSystemOwner) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="max-w-md w-full bg-white border border-slate-200 rounded-xl p-8 text-center space-y-4 shadow-xs">
+          <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-600 mx-auto flex items-center justify-center">
+            <AlertTriangle className="w-6 h-6" />
+          </div>
+          <h1 className="font-display text-xl font-bold text-slate-900">
+            Workspace Sync Interrupted
+          </h1>
+          <p className="text-xs text-slate-600 leading-relaxed">{profileError}</p>
+          <p className="text-xs text-slate-500">
+            Signed in as <strong className="text-slate-800">{user.email}</strong> — your session is
+            still active.
+          </p>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => void retryProfileSync()}
+              className="flex-1 px-4 py-2.5 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-lg cursor-pointer"
+            >
+              Retry Connection
+            </button>
+            <button
+              type="button"
+              onClick={logout}
+              className="px-4 py-2.5 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg cursor-pointer"
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
   // 4. SIGNED IN WITH NO ORGANIZATION ACCESS YET (SELF-SERVE TRIAL OR INVITE)
   // =========================================================================
-  if (!organization && !isSuperAdmin && !isStudent) {
+  if (!organization && !isSuperAdmin && !isSystemOwner && !isStudent) {
     const handleSelfServeLaunch = async (e: React.FormEvent) => {
       e.preventDefault();
       if (companyName.trim().length < 2) {
