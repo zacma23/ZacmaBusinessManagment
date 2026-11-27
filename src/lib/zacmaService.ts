@@ -12,6 +12,7 @@ import {
   where,
 } from 'firebase/firestore';
 import { db, auth, handleFirestoreError, OperationType } from './firebase';
+import { safeFetchJson } from './apiClient';
 import type {
   BusinessUnit,
   DynamicForm,
@@ -574,17 +575,27 @@ export async function submitPublicForm(params: {
   websiteTrap: string;
 }): Promise<{ leadRef: string; submissionId: string }> {
   // Step 1: Server-side rate-limit and honeypot check
-  const checkResp = await fetch('/api/security/verify-submission', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      publicSlugKey: params.publicForm.publicSlugKey,
-      websiteTrap: params.websiteTrap,
-    }),
-  });
-  const checkData = (await checkResp.json()) as { allowed?: boolean; reason?: string };
-  if (!checkResp.ok || !checkData.allowed) {
-    throw new Error(checkData.reason || 'Submission blocked by security checkpoint.');
+  if (params.websiteTrap.trim().length > 0) {
+    throw new Error('Automated spam submission rejected.');
+  }
+
+  const checkRes = await safeFetchJson<{ allowed?: boolean; reason?: string; error?: string }>(
+    '/api/security/verify-submission',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        publicSlugKey: params.publicForm.publicSlugKey,
+        websiteTrap: params.websiteTrap,
+      }),
+    }
+  );
+  if (!checkRes.ok || !checkRes.data?.allowed) {
+    throw new Error(
+      checkRes.data?.reason ||
+        checkRes.errorMessage ||
+        'Submission blocked by security checkpoint.'
+    );
   }
 
   const submissionId = generateId('sub');
@@ -930,7 +941,12 @@ export async function sendAndLogCommunication(params: {
   const personalizedBody = mergeTemplateVariables(params.body, params.lead);
 
   const token = await auth.currentUser?.getIdToken();
-  const resp = await fetch('/api/communications/dispatch', {
+  const dispatchRes = await safeFetchJson<{
+    deliveryStatus?: CommunicationRecord['deliveryStatus'];
+    provider?: string;
+    note?: string;
+    error?: string;
+  }>('/api/communications/dispatch', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -944,12 +960,11 @@ export async function sendAndLogCommunication(params: {
     }),
   });
 
-  const dispatchResult = (await resp.json()) as {
-    deliveryStatus?: CommunicationRecord['deliveryStatus'];
-    provider?: string;
-    note?: string;
-  };
+  if (!dispatchRes.ok || !dispatchRes.data) {
+    throw new Error(dispatchRes.errorMessage || 'Failed to dispatch communication.');
+  }
 
+  const dispatchResult = dispatchRes.data;
   const deliveryStatus: CommunicationRecord['deliveryStatus'] =
     dispatchResult.deliveryStatus || 'queued_pending_provider_approval';
   const provider = dispatchResult.provider || (params.channel === 'email' ? 'resend_email' : 'twilio_sms');
@@ -1075,7 +1090,12 @@ export async function sendDirectCommunication(params: {
   actorName: string;
 }): Promise<{ deliveryStatus: CommunicationRecord['deliveryStatus']; provider: string; note?: string }> {
   const token = await auth.currentUser?.getIdToken();
-  const resp = await fetch('/api/communications/dispatch', {
+  const dispatchRes = await safeFetchJson<{
+    deliveryStatus?: CommunicationRecord['deliveryStatus'];
+    provider?: string;
+    note?: string;
+    error?: string;
+  }>('/api/communications/dispatch', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1089,16 +1109,11 @@ export async function sendDirectCommunication(params: {
     }),
   });
 
-  const data = (await resp.json()) as {
-    deliveryStatus?: CommunicationRecord['deliveryStatus'];
-    provider?: string;
-    note?: string;
-    error?: string;
-  };
-  if (!resp.ok) {
-    throw new Error(data.error || 'Failed to dispatch communication.');
+  if (!dispatchRes.ok || !dispatchRes.data) {
+    throw new Error(dispatchRes.errorMessage || 'Failed to dispatch communication.');
   }
 
+  const data = dispatchRes.data;
   const deliveryStatus: CommunicationRecord['deliveryStatus'] =
     data.deliveryStatus || 'queued_pending_provider_approval';
   const provider = data.provider || (params.channel === 'email' ? 'resend_email' : 'twilio_sms');

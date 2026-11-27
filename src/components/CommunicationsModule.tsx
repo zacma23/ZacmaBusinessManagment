@@ -17,6 +17,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { auth } from '../lib/firebase';
+import { safeFetchJson } from '../lib/apiClient';
 import { usePortal } from '../context/PortalContext';
 import {
   canManageOrg,
@@ -350,7 +351,12 @@ export function CommunicationsModule({ activeSection, initialDraft, onNavigate }
     setAiError(null);
     try {
       const token = await auth.currentUser?.getIdToken();
-      const resp = await fetch('/api/ai/compose-message', {
+      const res = await safeFetchJson<{
+        emailSubject?: string;
+        emailBody?: string;
+        smsBody?: string;
+        error?: string;
+      }>('/api/ai/compose-message', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -366,15 +372,10 @@ export function CommunicationsModule({ activeSection, initialDraft, onNavigate }
           courseFee: '8,500 ETB',
         }),
       });
-      const data = (await resp.json()) as {
-        emailSubject?: string;
-        emailBody?: string;
-        smsBody?: string;
-        error?: string;
-      };
-      if (!resp.ok) {
-        throw new Error(data.error || 'Failed to generate Email/SMS draft.');
+      if (!res.ok || !res.data) {
+        throw new Error(res.errorMessage || 'Failed to generate Email/SMS draft.');
       }
+      const data = res.data;
       if (data.emailSubject) setSubject(data.emailSubject);
       if (data.emailBody) setEmailBody(data.emailBody);
       if (data.smsBody) setSmsBody(data.smsBody);

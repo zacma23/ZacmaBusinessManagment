@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ShieldCheck, KeyRound, History, Check, Ban, Sliders } from 'lucide-react';
 import { auth } from '../lib/firebase';
+import { safeFetchJson } from '../lib/apiClient';
 import { usePortal } from '../context/PortalContext';
 import {
   formatTimestamp,
@@ -31,13 +32,14 @@ export function IntegrationsSecurityModule() {
     auth.currentUser
       ?.getIdToken()
       .then((token) =>
-        fetch('/api/integrations/status', {
+        safeFetchJson<Record<string, { configured: boolean }>>('/api/integrations/status', {
           headers: { Authorization: `Bearer ${token}` },
         })
       )
-      .then((r) => (r.ok ? r.json() : {}))
-      .then((data) => {
-        if (active && data) setServerEnvStatus(data);
+      .then((res) => {
+        if (active && res?.ok && res.data) {
+          setServerEnvStatus(res.data);
+        }
       })
       .catch(() => {});
     return () => {

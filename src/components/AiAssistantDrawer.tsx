@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Sparkles, X, Send, Loader2, ArrowRight, ShieldCheck } from 'lucide-react';
 import { auth } from '../lib/firebase';
+import { safeFetchJson } from '../lib/apiClient';
 import { usePortal } from '../context/PortalContext';
 import type { LeadFilterPreset, LeadStatus, NavSection } from '../types';
 
@@ -124,7 +125,11 @@ export function AiAssistantDrawer({ open, onClose, onExecuteAction }: Props) {
 
     try {
       const token = await auth.currentUser?.getIdToken();
-      const resp = await fetch('/api/ai/assistant', {
+      const res = await safeFetchJson<{
+        reply?: string;
+        suggestedAction?: SuggestedAction | null;
+        error?: string;
+      }>('/api/ai/assistant', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -137,10 +142,10 @@ export function AiAssistantDrawer({ open, onClose, onExecuteAction }: Props) {
           history: nextHistory.slice(-6).map((m) => ({ role: m.role, content: m.content })),
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || 'Assistant unavailable.');
+      if (!res.ok || !res.data) {
+        throw new Error(res.errorMessage || 'Assistant unavailable.');
       }
+      const data = res.data;
 
       setMessages((prev) => [
         ...prev,

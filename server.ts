@@ -13,20 +13,83 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3000);
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Load Firebase public web config from provisioned config for token verification & Identity Toolkit REST calls (requires no IAM)
-let firebaseWebApiKey = '';
-let firebaseProjectId = '';
-let firebaseDatabaseId = '(default)';
+// Load Firebase public web config from provisioned config (works in local dev, Cloud Run, and Vercel serverless)
+let firebaseWebApiKey = (process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || '').trim();
+let firebaseProjectId = (process.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID || '').trim();
+let firebaseDatabaseId = (process.env.VITE_FIREBASE_DATABASE_ID || process.env.FIREBASE_DATABASE_ID || '(default)').trim();
 try {
-  const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
-  if (fs.existsSync(cfgPath)) {
+  const candidatePaths = [
+    path.resolve(__dirname, 'firebase-applet-config.json'),
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+  ];
+  const cfgPath = candidatePaths.find((p) => fs.existsSync(p));
+  if (cfgPath) {
     const parsed = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-    firebaseWebApiKey = parsed.apiKey || '';
-    firebaseProjectId = parsed.projectId || '';
-    firebaseDatabaseId = parsed.firestoreDatabaseId || '(default)';
+    firebaseWebApiKey = firebaseWebApiKey || parsed.apiKey || '';
+    firebaseProjectId = firebaseProjectId || parsed.projectId || '';
+    if (firebaseDatabaseId === '(default)' && parsed.firestoreDatabaseId) {
+      firebaseDatabaseId = parsed.firestoreDatabaseId;
+    }
   }
-} catch {
-  // Ignore if config not present yet
+} catch (err) {
+  console.warn('[Zacma Server] Unable to read firebase-applet-config.json:', err instanceof Error ? err.message : err);
+}
+
+// Never blindly call resp.json() on upstream HTTP calls — inspect raw response first
+async function safeParseUpstreamJson<T = Record<string, unknown>>(
+  resp: Response,
+  label: string
+): Promise<T | null> {
+  const contentType = resp.headers.get('content-type') || '';
+  let rawText = '';
+  try {
+    rawText = await resp.text();
+  } catch (err) {
+    console.error(`[Zacma Server Upstream] Failed to read body (${label})`, {
+      status: resp.status,
+      contentType,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch (err) {
+    console.error(`[Zacma Server Upstream] Non-JSON response (${label})`, {
+      status: resp.status,
+      contentType,
+      rawBodyPreview: trimmed.slice(0, 400),
+      parseError: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+// Safely parse structured JSON returned by Gemini (strips accidental markdown code fences)
+function safeParseAiJson<T = Record<string, unknown>>(rawText: string, label: string): T {
+  let cleaned = (rawText || '').trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  }
+  if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+  }
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch (err) {
+    const parseErr = err instanceof Error ? err.message : String(err);
+    console.error(`[Zacma Server AI JSON] Failed to parse AI output (${label})`, {
+      rawBodyPreview: (rawText || '').slice(0, 500),
+      parseError: parseErr,
+    });
+    throw new Error(`AI returned malformed JSON (${label}): ${parseErr}`);
+  }
 }
 
 // Gemini AI Server-Side Client (shared singleton)
@@ -94,10 +157,10 @@ async function verifyFirebaseBearer(req: express.Request): Promise<{
       }
     );
     if (!resp.ok) return null;
-    const data = (await resp.json()) as {
+    const data = await safeParseUpstreamJson<{
       users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
-    };
-    const user = data.users?.[0];
+    }>(resp, 'identitytoolkit:accounts:lookup');
+    const user = data?.users?.[0];
     if (!user?.localId) return null;
     return {
       uid: user.localId,
@@ -126,10 +189,10 @@ async function fetchFirestoreDocWithToken(
       headers: { Authorization: `Bearer ${idToken}` },
     });
     if (!resp.ok) return null;
-    const data = (await resp.json()) as {
+    const data = await safeParseUpstreamJson<{
       fields?: Record<string, { stringValue?: string; booleanValue?: boolean }>;
-    };
-    return data.fields || null;
+    }>(resp, `firestore:${docPath}`);
+    return data?.fields || null;
   } catch {
     return null;
   }
@@ -208,7 +271,7 @@ function sanitizeText(input: unknown, maxLen: number): string {
   return input.replace(/[<>]/g, '').trim().slice(0, maxLen);
 }
 
-async function startServer() {
+export function createApiApp(): express.Express {
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '2mb' }));
@@ -316,10 +379,10 @@ async function startServer() {
     try {
       const resp = await fetch(url);
       if (!resp.ok) return null;
-      const doc = (await resp.json()) as {
+      const doc = await safeParseUpstreamJson<{
         fields?: Record<string, { stringValue?: string }>;
-      };
-      const f = doc.fields;
+      }>(resp, `firestore:usernameLookup/${username}`);
+      const f = doc?.fields;
       if (!f?.loginEmail?.stringValue || !f?.uid?.stringValue) return null;
       return {
         loginEmail: f.loginEmail.stringValue,
@@ -357,7 +420,10 @@ async function startServer() {
           }),
         }
       );
-      const data = (await probe.json()) as { error?: { message?: string } };
+      const data = await safeParseUpstreamJson<{ error?: { message?: string } }>(
+        probe,
+        'identitytoolkit:provider-probe'
+      );
       const errMsg = data?.error?.message || '';
       const disabled =
         errMsg.includes('PASSWORD_LOGIN_DISABLED') || errMsg.includes('OPERATION_NOT_ALLOWED');
@@ -457,11 +523,12 @@ async function startServer() {
         }
       );
 
-      const verifyData = (await verifyResp.json()) as {
-        localId?: string;
-        email?: string;
-        error?: { message?: string };
-      };
+      const verifyData =
+        (await safeParseUpstreamJson<{
+          localId?: string;
+          email?: string;
+          error?: { message?: string };
+        }>(verifyResp, 'identitytoolkit:signInWithPassword')) || {};
 
       if (!verifyResp.ok) {
         const fbErr = verifyData.error?.message || 'INVALID_LOGIN_CREDENTIALS';
@@ -591,12 +658,13 @@ async function startServer() {
         }
       );
 
-      const signUpData = (await signUpResp.json()) as {
-        localId?: string;
-        idToken?: string;
-        email?: string;
-        error?: { message?: string };
-      };
+      const signUpData =
+        (await safeParseUpstreamJson<{
+          localId?: string;
+          idToken?: string;
+          email?: string;
+          error?: { message?: string };
+        }>(signUpResp, 'identitytoolkit:signUp')) || {};
 
       if (!signUpResp.ok || !signUpData.localId) {
         const fbErr = signUpData.error?.message || 'ACCOUNT_CREATE_FAILED';
@@ -870,7 +938,7 @@ Requirements:
         return;
       }
 
-      const parsed = JSON.parse(rawText);
+      const parsed = safeParseAiJson<Record<string, unknown>>(rawText, 'generate-form');
       const seenIds = new Set<string>();
       const validatedFields = Array.isArray(parsed.fields)
         ? parsed.fields.slice(0, 60).map((f: Record<string, unknown>, idx: number) => {
@@ -1035,7 +1103,10 @@ ${message}`;
         },
       });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsed = safeParseAiJson<{
+        reply?: string;
+        suggestedAction?: { type?: string } & Record<string, unknown>;
+      }>(response.text ?? '{}', 'ai-assistant');
       res.json({
         reply: typeof parsed.reply === 'string' ? parsed.reply : 'I reviewed your authorized workspace data.',
         suggestedAction:
@@ -1194,7 +1265,7 @@ ${message}`;
         },
       });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsed = safeParseAiJson<Record<string, any>>(response.text ?? '{}', 'support-chat');
       const validIntents = new Set(['course_inquiry', 'registration', 'student_support', 'escalation', 'general']);
       const validLangs = new Set(['en', 'am', 'other']);
 
@@ -1316,7 +1387,7 @@ ${prompt}`;
         },
       });
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
+      const parsed = safeParseAiJson<Record<string, unknown>>(response.text ?? '{}', 'compose-message');
       res.json({
         emailSubject: sanitizeText(parsed.emailSubject, 250),
         emailBody: typeof parsed.emailBody === 'string' ? parsed.emailBody.trim().slice(0, 4000) : '',
@@ -1528,6 +1599,54 @@ ${prompt}`;
     res.json({ allowed: true });
   });
 
+  // Explicit JSON 404 catch-all for any unmatched /api/* route (NEVER fall through to HTML SPA)
+  app.use('/api', (req, res) => {
+    res.status(404).json({
+      error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+      status: 404,
+    });
+  });
+
+  // Explicit JSON error handler for malformed request bodies or uncaught /api/* errors
+  app.use(
+    (
+      err: Error & { status?: number; type?: string },
+      req: express.Request,
+      res: express.Response,
+      next: express.NextFunction
+    ) => {
+      if (res.headersSent) {
+        next(err);
+        return;
+      }
+      if (req.originalUrl.startsWith('/api') || err.type === 'entity.parse.failed') {
+        const statusCode =
+          err.type === 'entity.parse.failed' ? 400 : typeof err.status === 'number' ? err.status : 500;
+        console.error('[Zacma Server API Error]', {
+          url: req.originalUrl,
+          method: req.method,
+          status: statusCode,
+          error: err.message,
+        });
+        res.status(statusCode).json({
+          error:
+            err.type === 'entity.parse.failed'
+              ? 'Malformed JSON request payload.'
+              : err.message || 'Internal API server error.',
+          status: statusCode,
+        });
+        return;
+      }
+      next(err);
+    }
+  );
+
+  return app;
+}
+
+async function startServer() {
+  const app = createApiApp();
+
   // ===========================================================================
   // VITE DEV MIDDLEWARE OR PRODUCTION STATIC ASSETS
   // ===========================================================================
@@ -1551,7 +1670,15 @@ ${prompt}`;
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start Zacma server:', err);
-  process.exit(1);
-});
+// Only start standalone HTTP listener when executed directly (never when imported by Vercel serverless api/index.ts)
+const isDirectExecution =
+  !process.env.VERCEL &&
+  Boolean(process.argv[1]) &&
+  path.resolve(process.argv[1]) === __filename;
+
+if (isDirectExecution) {
+  startServer().catch((err) => {
+    console.error('Failed to start Zacma server:', err);
+    process.exit(1);
+  });
+}

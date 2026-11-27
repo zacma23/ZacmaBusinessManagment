@@ -16,6 +16,7 @@ import {
   Search,
 } from 'lucide-react';
 import { auth } from '../lib/firebase';
+import { safeFetchJson, safeJsonParse } from '../lib/apiClient';
 import {
   DEFAULT_SUPPORT_WELCOME_MESSAGE,
   captureAiChatLeadOrEscalation,
@@ -134,7 +135,7 @@ export function SupportChatWidget({
         try {
           const saved = sessionStorage.getItem(storageKey);
           if (saved) {
-            const parsed = JSON.parse(saved) as SupportChatMessage[];
+            const parsed = safeJsonParse<SupportChatMessage[]>(saved, 'SupportChatWidget.sessionStorage');
             if (Array.isArray(parsed) && parsed.length > 0) {
               setMessages(parsed);
               setBundleLoading(false);
@@ -311,29 +312,34 @@ export function SupportChatWidget({
         language: f.language,
       }));
 
-      const resp = await fetch('/api/ai/support-chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-        },
-        body: JSON.stringify({
-          message: cleanText,
-          preferredLanguage: language,
-          aiInstructions: config?.aiInstructions || '',
-          registrationFormUrl: effectiveFormUrl,
-          courses: coursePayload,
-          faqs: faqPayload,
-          registrationDraft: draft,
-          studentRegistrations: currentUser ? ownRecords : [],
-          history: nextMessages.slice(-10).map((m) => ({ role: m.role, text: m.text })),
-        }),
-      });
+      const res = await safeFetchJson<SupportApiResponse & { error?: string }>(
+        '/api/ai/support-chat',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+          },
+          body: JSON.stringify({
+            message: cleanText,
+            preferredLanguage: language,
+            aiInstructions: config?.aiInstructions || '',
+            registrationFormUrl: effectiveFormUrl,
+            courses: coursePayload,
+            faqs: faqPayload,
+            registrationDraft: draft,
+            studentRegistrations: currentUser ? ownRecords : [],
+            history: nextMessages.slice(-10).map((m) => ({ role: m.role, text: m.text })),
+          }),
+        }
+      );
 
-      const data = (await resp.json()) as SupportApiResponse & { error?: string };
-      if (!resp.ok) {
-        throw new Error(data.error || 'Assistant is temporarily unavailable. Please try again.');
+      if (!res.ok || !res.data) {
+        throw new Error(
+          res.errorMessage || 'Assistant is temporarily unavailable. Please try again.'
+        );
       }
+      const data = res.data;
 
       const aiMsg: SupportChatMessage = {
         id: generateId('ai'),

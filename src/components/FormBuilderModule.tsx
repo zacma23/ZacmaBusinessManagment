@@ -31,6 +31,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { auth } from '../lib/firebase';
+import { safeFetchJson } from '../lib/apiClient';
 import { usePortal } from '../context/PortalContext';
 import {
   canManageForms,
@@ -206,7 +207,14 @@ export function FormBuilderModule({
     setAiError(null);
     try {
       const token = await auth.currentUser?.getIdToken();
-      const resp = await fetch('/api/ai/generate-form', {
+      const res = await safeFetchJson<{
+        title?: string;
+        slug?: string;
+        description?: string;
+        confirmationMessage?: string;
+        fields?: FormField[];
+        error?: string;
+      }>('/api/ai/generate-form', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -219,14 +227,14 @@ export function FormBuilderModule({
           services: selectedBu.services,
         }),
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || 'AI generation failed.');
+      if (!res.ok || !res.data) {
+        throw new Error(res.errorMessage || 'AI generation failed.');
       }
+      const data = res.data;
 
       setEditingForm(null);
-      setTitle(data.title);
-      setSlug(data.slug || slugify(data.title));
+      setTitle(data.title || 'Generated Inquiry Form');
+      setSlug(data.slug || slugify(data.title || 'generated-form'));
       setDescription(data.description || '');
       setConfirmationMessage(data.confirmationMessage || 'Thank you for your submission.');
       setBrandColor(selectedBu.brandColor || '#1D4ED8');

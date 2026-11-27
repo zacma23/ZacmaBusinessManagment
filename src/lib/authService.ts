@@ -25,6 +25,7 @@ import {
   SYSTEM_OWNER_NAME,
 } from './firebase';
 import { clampList, clampStr, DEFAULT_ORG_ID, generateId, logAuditEvent } from './zacmaService';
+import { safeFetchJson } from './apiClient';
 import type {
   LoginActivityRecord,
   MemberPermissions,
@@ -304,30 +305,26 @@ export interface AuthProviderStatus {
 }
 
 export async function fetchAuthProviderStatus(): Promise<AuthProviderStatus> {
-  try {
-    const resp = await fetch('/api/auth/provider-status');
-    if (resp.ok) {
-      return (await resp.json()) as AuthProviderStatus;
-    }
-  } catch {
-    // Fallback to direct Identity Toolkit probe if deployed as static SPA
+  const serverRes = await safeFetchJson<AuthProviderStatus>('/api/auth/provider-status');
+  if (serverRes.ok && serverRes.data) {
+    return serverRes.data;
   }
 
-  try {
-    const probe = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(FIREBASE_PUBLIC_API_KEY)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: 'probe-status-check@invalid.zacma.local',
-          password: 'ProbeCheck#0000',
-          returnSecureToken: false,
-        }),
-      }
-    );
-    const data = (await probe.json()) as { error?: { message?: string } };
-    const msg = data?.error?.message || '';
+  // Fallback to direct Identity Toolkit probe if deployed without Express API
+  const probeRes = await safeFetchJson<{ error?: { message?: string } }>(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(FIREBASE_PUBLIC_API_KEY)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'probe-status-check@invalid.zacma.local',
+        password: 'ProbeCheck#0000',
+        returnSecureToken: false,
+      }),
+    }
+  );
+  if (probeRes.isJson && probeRes.data) {
+    const msg = probeRes.data.error?.message || '';
     const disabled =
       msg.includes('PASSWORD_LOGIN_DISABLED') || msg.includes('OPERATION_NOT_ALLOWED');
     return {
@@ -338,14 +335,14 @@ export async function fetchAuthProviderStatus(): Promise<AuthProviderStatus> {
         ? 'Email/Password sign-in is disabled in Firebase Console. Enable it under Authentication → Sign-in method → Email/Password.'
         : 'Email/Password sign-in is active.',
     };
-  } catch {
-    return {
-      projectId: FIREBASE_PROJECT_ID,
-      googleEnabled: true,
-      emailPasswordEnabled: false,
-      detail: 'Could not verify Firebase provider status.',
-    };
   }
+
+  return {
+    projectId: FIREBASE_PROJECT_ID,
+    googleEnabled: true,
+    emailPasswordEnabled: false,
+    detail: probeRes.errorMessage || 'Could not verify Firebase provider status.',
+  };
 }
 
 // =============================================================================
@@ -374,14 +371,14 @@ export async function verifySessionWithServer(): Promise<ServerVerifiedSession |
 
   try {
     const idToken = await currentUser.getIdToken();
-    const resp = await fetch('/api/auth/session-verify', {
+    const res = await safeFetchJson<ServerVerifiedSession>('/api/auth/session-verify', {
       headers: { Authorization: `Bearer ${idToken}` },
     });
-    if (resp.ok) {
-      return (await resp.json()) as ServerVerifiedSession;
+    if (res.ok && res.data && res.data.authenticated) {
+      return res.data;
     }
   } catch {
-    // Graceful fallback when running on static Vercel SPA without Express routes
+    // Graceful fallback when backend route is unreachable
   }
 
   const email = (currentUser.email || '').toLowerCase();
@@ -519,35 +516,30 @@ export async function loginWithUsernameAndPassword(
 
   // Step 1: Try hardened server endpoint (enforces IP + username brute-force lockout)
   let usedServerRoute = false;
-  try {
-    const resp = await fetch('/api/auth/username-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, password }),
-    });
+  const loginRes = await safeFetchJson<{
+    ok?: boolean;
+    loginEmail?: string;
+    code?: string;
+    error?: string;
+  }>('/api/auth/username-login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier, password }),
+  });
 
-    if (resp.status !== 404) {
-      usedServerRoute = true;
-      const data = (await resp.json()) as {
-        ok?: boolean;
-        loginEmail?: string;
-        code?: string;
-        error?: string;
-      };
-      if (!resp.ok || !data.loginEmail) {
-        const err = new Error(data.error || 'Invalid username or password.') as Error & {
-          code?: string;
-        };
-        err.code = data.code;
-        throw err;
-      }
-      resolvedEmail = data.loginEmail;
-    }
-  } catch (err: unknown) {
-    if (usedServerRoute) {
+  if (loginRes.isJson && !loginRes.isEndpointUnavailable) {
+    usedServerRoute = true;
+    const data = loginRes.data;
+    if (!loginRes.ok || !data?.loginEmail) {
+      const err = new Error(
+        data?.error || loginRes.errorMessage || 'Invalid username or password.'
+      ) as Error & { code?: string };
+      err.code = data?.code;
       throw err;
     }
-    // If fetch itself failed or 404 (static Vercel SPA without Express), fall back to direct Firestore lookup
+    resolvedEmail = data.loginEmail;
+  } else if (!loginRes.isEndpointUnavailable && loginRes.status >= 500) {
+    throw new Error(loginRes.errorMessage || 'Authentication server returned an invalid response.');
   }
 
   // Static-host fallback: resolve username via exact-match Firestore rule
@@ -595,32 +587,28 @@ export async function requestPasswordReset(
     throw new Error('Please enter your username or email address.');
   }
 
-  let usedServerRoute = false;
-  try {
-    const resp = await fetch('/api/auth/password-reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier }),
-    });
-    if (resp.status !== 404) {
-      usedServerRoute = true;
-      const data = (await resp.json()) as {
-        message?: string;
-        requiresAdminReset?: boolean;
-        error?: string;
-      };
-      if (!resp.ok) {
-        throw new Error(data.error || 'Could not process password reset.');
-      }
-      return {
-        message:
-          data.message ||
-          'If a matching account exists, a password reset link has been sent to the registered email.',
-        requiresAdminReset: data.requiresAdminReset,
-      };
+  const resetRes = await safeFetchJson<{
+    message?: string;
+    requiresAdminReset?: boolean;
+    error?: string;
+  }>('/api/auth/password-reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier }),
+  });
+
+  if (resetRes.isJson && !resetRes.isEndpointUnavailable) {
+    if (!resetRes.ok) {
+      throw new Error(resetRes.data?.error || resetRes.errorMessage || 'Could not process password reset.');
     }
-  } catch (err: unknown) {
-    if (usedServerRoute) throw err;
+    return {
+      message:
+        resetRes.data?.message ||
+        'If a matching account exists, a password reset link has been sent to the registered email.',
+      requiresAdminReset: resetRes.data?.requiresAdminReset,
+    };
+  } else if (!resetRes.isEndpointUnavailable && resetRes.status >= 500) {
+    throw new Error(resetRes.errorMessage || 'Password reset service returned an invalid response.');
   }
 
   // Static-host fallback
@@ -789,41 +777,49 @@ export async function adminProvisionUserAccount(
     // Provision Firebase Auth user WITHOUT signing out the currently logged-in administrator
     const token = await auth.currentUser?.getIdToken();
     let usedServerRoute = false;
-    try {
-      const resp = await fetch('/api/auth/admin/create-account', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          loginEmail,
-          password: params.password,
-          displayName: cleanName,
-          organizationId: params.organizationId,
-          role: params.role,
-        }),
-      });
-      if (resp.status !== 404) {
-        usedServerRoute = true;
-        const data = (await resp.json()) as { uid?: string; loginEmail?: string; error?: string; code?: string };
-        if (!resp.ok || !data.uid) {
-          const err = new Error(data.error || 'Failed to create user credentials.') as Error & {
-            code?: string;
-          };
-          err.code = data.code;
-          throw err;
-        }
-        targetUid = data.uid;
-        loginEmail = data.loginEmail || loginEmail;
+    const createRes = await safeFetchJson<{
+      uid?: string;
+      loginEmail?: string;
+      error?: string;
+      code?: string;
+    }>('/api/auth/admin/create-account', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        loginEmail,
+        password: params.password,
+        displayName: cleanName,
+        organizationId: params.organizationId,
+        role: params.role,
+      }),
+    });
+
+    if (createRes.isJson && !createRes.isEndpointUnavailable) {
+      usedServerRoute = true;
+      const data = createRes.data;
+      if (!createRes.ok || !data?.uid) {
+        const err = new Error(
+          data?.error || createRes.errorMessage || 'Failed to create user credentials.'
+        ) as Error & { code?: string };
+        err.code = data?.code;
+        throw err;
       }
-    } catch (err: unknown) {
-      if (usedServerRoute) throw err;
+      targetUid = data.uid;
+      loginEmail = data.loginEmail || loginEmail;
+    } else if (!createRes.isEndpointUnavailable && createRes.status >= 500) {
+      throw new Error(createRes.errorMessage || 'Account provisioning server returned an invalid response.');
     }
 
     // Static-host fallback: call Firebase Identity Toolkit accounts:signUp directly
     if (!usedServerRoute) {
-      const signUpResp = await fetch(
+      const signUpRes = await safeFetchJson<{
+        localId?: string;
+        email?: string;
+        error?: { message?: string };
+      }>(
         `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(FIREBASE_PUBLIC_API_KEY)}`,
         {
           method: 'POST',
@@ -835,13 +831,9 @@ export async function adminProvisionUserAccount(
           }),
         }
       );
-      const signUpData = (await signUpResp.json()) as {
-        localId?: string;
-        email?: string;
-        error?: { message?: string };
-      };
-      if (!signUpResp.ok || !signUpData.localId) {
-        const fbErr = signUpData.error?.message || 'ACCOUNT_CREATE_FAILED';
+      const signUpData = signUpRes.data;
+      if (!signUpRes.ok || !signUpData?.localId) {
+        const fbErr = signUpData?.error?.message || signUpRes.errorMessage || 'ACCOUNT_CREATE_FAILED';
         if (fbErr.includes('OPERATION_NOT_ALLOWED') || fbErr.includes('PASSWORD_LOGIN_DISABLED')) {
           const err = new Error(
             'Email/Password sign-in is disabled in Firebase Console. Enable Authentication → Sign-in method → Email/Password on project zacma-4881c.'
