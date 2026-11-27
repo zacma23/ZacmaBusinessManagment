@@ -92,48 +92,181 @@ function safeParseAiJson<T = Record<string, unknown>>(rawText: string, label: st
   }
 }
 
-// Resolve server-side Gemini API key (supports GEMINI_API_KEY and standard server aliases)
-function resolveGeminiApiKey(): string {
-  const candidates = [
-    process.env.GEMINI_API_KEY,
-    process.env.GOOGLE_API_KEY,
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-    process.env.API_KEY,
-  ];
-  for (const raw of candidates) {
-    const trimmed = (raw || '').trim().replace(/^["']|["']$/g, '');
-    if (trimmed && trimmed !== 'MY_GEMINI_API_KEY') {
-      return trimmed;
-    }
-  }
-  return '';
+type AiProviderKind = 'grok' | 'groq' | 'gemini';
+
+interface ResolvedAiProvider {
+  provider: AiProviderKind;
+  apiKey: string;
+  model: string;
+  baseUrl?: string;
 }
 
-class MissingGeminiKeyError extends Error {
+const PLACEHOLDER_KEYS = new Set([
+  'MY_GEMINI_API_KEY',
+  'MY_GROK_API_KEY',
+  'MY_XAI_API_KEY',
+  'MY_GROQ_API_KEY',
+  'YOUR_API_KEY',
+]);
+
+function cleanEnvSecret(raw?: string): string {
+  const trimmed = (raw || '').trim().replace(/^["']|["']$/g, '');
+  if (!trimmed || PLACEHOLDER_KEYS.has(trimmed)) return '';
+  return trimmed;
+}
+
+// Resolve server-side AI provider from environment variables (never hardcoded or exposed to client).
+// Supports xAI Grok (GROK_API_KEY / XAI_API_KEY), Groq (GROQ_API_KEY or gsk_* key), and Gemini (GEMINI_API_KEY).
+function resolveAiProvider(): ResolvedAiProvider | null {
+  const preferred = (process.env.AI_PROVIDER || '').trim().toLowerCase();
+
+  const grokRaw = cleanEnvSecret(process.env.GROK_API_KEY) || cleanEnvSecret(process.env.XAI_API_KEY);
+  const groqRaw = cleanEnvSecret(process.env.GROQ_API_KEY);
+  const geminiRaw =
+    cleanEnvSecret(process.env.GEMINI_API_KEY) ||
+    cleanEnvSecret(process.env.GOOGLE_API_KEY) ||
+    cleanEnvSecret(process.env.GOOGLE_GENERATIVE_AI_API_KEY) ||
+    cleanEnvSecret(process.env.API_KEY);
+
+  const makeGrok = (apiKey: string): ResolvedAiProvider => ({
+    provider: 'grok',
+    apiKey,
+    model: (process.env.GROK_MODEL || process.env.XAI_MODEL || 'grok-3-mini').trim(),
+    baseUrl: (process.env.GROK_API_BASE_URL || 'https://api.x.ai/v1').trim().replace(/\/+$/, ''),
+  });
+
+  const makeGroq = (apiKey: string): ResolvedAiProvider => ({
+    provider: 'groq',
+    apiKey,
+    model: (process.env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim(),
+    baseUrl: (process.env.GROQ_API_BASE_URL || 'https://api.groq.com/openai/v1')
+      .trim()
+      .replace(/\/+$/, ''),
+  });
+
+  const makeGemini = (apiKey: string): ResolvedAiProvider => ({
+    provider: 'gemini',
+    apiKey,
+    model: (process.env.GEMINI_MODEL || 'gemini-4-hydrogen').trim(),
+  });
+
+  // Respect explicit AI_PROVIDER override when its corresponding key is available
+  if (preferred === 'gemini' && geminiRaw && !geminiRaw.startsWith('xai-') && !geminiRaw.startsWith('gsk_')) {
+    return makeGemini(geminiRaw);
+  }
+  if (preferred === 'groq' && (groqRaw || grokRaw)) {
+    return makeGroq(groqRaw || grokRaw);
+  }
+  if (preferred === 'grok' && grokRaw) {
+    return makeGrok(grokRaw);
+  }
+
+  // Default priority: Grok/xAI -> Groq -> Gemini (with prefix auto-detection for gsk_ and xai-)
+  if (grokRaw) {
+    if (grokRaw.startsWith('gsk_')) {
+      return makeGroq(grokRaw);
+    }
+    return makeGrok(grokRaw);
+  }
+  if (groqRaw) {
+    return makeGroq(groqRaw);
+  }
+  if (geminiRaw) {
+    if (geminiRaw.startsWith('xai-')) {
+      return makeGrok(geminiRaw);
+    }
+    if (geminiRaw.startsWith('gsk_')) {
+      return makeGroq(geminiRaw);
+    }
+    return makeGemini(geminiRaw);
+  }
+
+  return null;
+}
+
+class MissingAiKeyError extends Error {
   public readonly status = 503;
   constructor() {
     super(
-      'GEMINI_API_KEY is not configured on the server. Add GEMINI_API_KEY in your hosting environment (e.g., Vercel Project Settings → Environment Variables, then redeploy) or check Settings > Secrets.'
+      'AI API key is not configured on the server. Add GROK_API_KEY (or XAI_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY) in Vercel Project Settings → Environment Variables, then redeploy.'
     );
-    this.name = 'MissingGeminiKeyError';
+    this.name = 'MissingAiKeyError';
   }
 }
 
-// Gemini AI Server-Side Client
-const getGeminiClient = () => {
-  const apiKey = resolveGeminiApiKey();
-  if (!apiKey) {
-    throw new MissingGeminiKeyError();
+async function generateStructuredAiText(params: {
+  label: string;
+  systemInstruction: string;
+  contents: string;
+  jsonSchemaDescription: string;
+  geminiResponseSchema: Record<string, unknown>;
+}): Promise<string> {
+  const resolved = resolveAiProvider();
+  if (!resolved) {
+    throw new MissingAiKeyError();
   }
-  return new GoogleGenAI({
-    apiKey,
+
+  if (resolved.provider === 'grok' || resolved.provider === 'groq') {
+    const providerLabel = resolved.provider === 'grok' ? 'Grok (xAI)' : 'Groq';
+    const endpoint = `${resolved.baseUrl}/chat/completions`;
+    const systemPrompt = `${params.systemInstruction}
+
+STRICT JSON OUTPUT REQUIREMENT:
+Return ONLY a single valid JSON object with no markdown fences, no commentary, and no extra keys outside this structure:
+${params.jsonSchemaDescription}`;
+
+    const upstream = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${resolved.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: resolved.model,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: params.contents },
+        ],
+      }),
+    });
+
+    const payload = await safeParseUpstreamJson<{
+      choices?: Array<{ message?: { content?: string } }>;
+      error?: { message?: string };
+    }>(upstream, `${resolved.provider}:${params.label}`);
+
+    if (!upstream.ok) {
+      const upstreamMsg = payload?.error?.message || `HTTP ${upstream.status}`;
+      throw new Error(`${providerLabel} API request failed (${upstream.status}): ${upstreamMsg}`);
+    }
+
+    const content = payload?.choices?.[0]?.message?.content;
+    return typeof content === 'string' ? content.trim() : '';
+  }
+
+  const ai = new GoogleGenAI({
+    apiKey: resolved.apiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
       },
     },
   });
-};
+
+  const response = await ai.models.generateContent({
+    model: resolved.model,
+    contents: params.contents,
+    config: {
+      systemInstruction: params.systemInstruction,
+      responseMimeType: 'application/json',
+      responseSchema: params.geminiResponseSchema,
+    },
+  });
+
+  return (response.text ?? '').trim();
+}
 
 // Simple in-memory sliding-window rate limiter per IP + route bucket
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
@@ -832,10 +965,13 @@ export function createApiApp(): express.Express {
     );
     const afroReady = Boolean(process.env.AFROMESSAGE_API_TOKEN);
 
+    const activeAi = resolveAiProvider();
+
     res.json({
       gemini_ai: {
-        configured: Boolean(resolveGeminiApiKey()),
-        model: 'gemini-4-hydrogen',
+        configured: Boolean(activeAi),
+        provider: activeAi?.provider || 'unconfigured',
+        model: activeAi?.model || 'unconfigured',
       },
       resend_email: {
         configured: Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL),
@@ -881,9 +1017,10 @@ export function createApiApp(): express.Express {
     }
 
     try {
-      const ai = getGeminiClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+      const rawText = await generateStructuredAiText({
+        label: 'generate-form',
+        systemInstruction:
+          'You are an enterprise form architect for Zacma SaaS Portal. Produce clean, well-structured, mobile-friendly form schemas as valid JSON matching the schema.',
         contents: `Create a structured, production-ready form schema for the business unit "${businessUnitName || 'Zacma Business Unit'}" (Category: ${businessUnitCategory || 'General Enterprise'}${servicesOffered.length ? `, Services: ${servicesOffered.join(', ')}` : ''}).
 
 Administrator instructions:
@@ -896,70 +1033,85 @@ Requirements:
 - Set sensible required flags, placeholders, helperText, and validation rules (minLength, maxLength, min, max, pattern).
 - If conditional follow-up fields make sense (or were requested), set conditionalOnFieldId (referencing an earlier field's id) and conditionalEqualsValue.
 - Make sure field IDs are clean snake_case strings (e.g. full_name, email_address, phone_number, preferred_course).`,
-        config: {
-          systemInstruction:
-            'You are an enterprise form architect for Zacma SaaS Portal. Produce clean, well-structured, mobile-friendly form schemas as valid JSON matching the schema.',
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING, description: 'Professional form title' },
-              description: { type: Type.STRING, description: 'Clear introductory instructions for visitors' },
-              slug: { type: Type.STRING, description: 'URL-friendly lowercase hyphenated slug' },
-              confirmationMessage: {
-                type: Type.STRING,
-                description: 'Polite confirmation message displayed after submission',
-              },
-              fields: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING, description: 'Unique snake_case field identifier' },
-                    type: {
-                      type: Type.STRING,
-                      description:
-                        'One of: short_text, long_text, email, phone, number, date, time, dropdown, multi_select, radio, checkboxes, file_upload, image_upload, address, url, yes_no, section_heading',
-                    },
-                    label: { type: Type.STRING, description: 'Human-readable field label' },
-                    placeholder: { type: Type.STRING, description: 'Helpful input placeholder' },
-                    helperText: { type: Type.STRING, description: 'Optional guidance text below field' },
-                    required: { type: Type.BOOLEAN, description: 'Whether field is mandatory' },
-                    section: { type: Type.STRING, description: 'Logical section name' },
-                    options: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                      description: 'Choices for dropdown, multi_select, radio, checkboxes',
-                    },
-                    validation: {
-                      type: Type.OBJECT,
-                      properties: {
-                        minLength: { type: Type.INTEGER },
-                        maxLength: { type: Type.INTEGER },
-                        min: { type: Type.NUMBER },
-                        max: { type: Type.NUMBER },
-                        pattern: { type: Type.STRING },
-                      },
-                    },
-                    conditionalOnFieldId: {
-                      type: Type.STRING,
-                      description: 'Optional earlier field id this field depends on',
-                    },
-                    conditionalEqualsValue: {
-                      type: Type.STRING,
-                      description: 'Value of conditionalOnFieldId that reveals this field',
+        jsonSchemaDescription: `{
+  "title": "string",
+  "description": "string",
+  "slug": "lowercase-hyphenated-string",
+  "confirmationMessage": "string",
+  "fields": [
+    {
+      "id": "snake_case_id",
+      "type": "short_text|long_text|email|phone|number|date|time|dropdown|multi_select|radio|checkboxes|file_upload|image_upload|address|url|yes_no|section_heading",
+      "label": "string",
+      "placeholder": "string",
+      "helperText": "string",
+      "required": true,
+      "section": "string",
+      "options": ["string"],
+      "validation": { "minLength": 0, "maxLength": 200, "min": 0, "max": 100, "pattern": "" },
+      "conditionalOnFieldId": "",
+      "conditionalEqualsValue": ""
+    }
+  ]
+}`,
+        geminiResponseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING, description: 'Professional form title' },
+            description: { type: Type.STRING, description: 'Clear introductory instructions for visitors' },
+            slug: { type: Type.STRING, description: 'URL-friendly lowercase hyphenated slug' },
+            confirmationMessage: {
+              type: Type.STRING,
+              description: 'Polite confirmation message displayed after submission',
+            },
+            fields: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING, description: 'Unique snake_case field identifier' },
+                  type: {
+                    type: Type.STRING,
+                    description:
+                      'One of: short_text, long_text, email, phone, number, date, time, dropdown, multi_select, radio, checkboxes, file_upload, image_upload, address, url, yes_no, section_heading',
+                  },
+                  label: { type: Type.STRING, description: 'Human-readable field label' },
+                  placeholder: { type: Type.STRING, description: 'Helpful input placeholder' },
+                  helperText: { type: Type.STRING, description: 'Optional guidance text below field' },
+                  required: { type: Type.BOOLEAN, description: 'Whether field is mandatory' },
+                  section: { type: Type.STRING, description: 'Logical section name' },
+                  options: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description: 'Choices for dropdown, multi_select, radio, checkboxes',
+                  },
+                  validation: {
+                    type: Type.OBJECT,
+                    properties: {
+                      minLength: { type: Type.INTEGER },
+                      maxLength: { type: Type.INTEGER },
+                      min: { type: Type.NUMBER },
+                      max: { type: Type.NUMBER },
+                      pattern: { type: Type.STRING },
                     },
                   },
-                  required: ['id', 'type', 'label', 'required'],
+                  conditionalOnFieldId: {
+                    type: Type.STRING,
+                    description: 'Optional earlier field id this field depends on',
+                  },
+                  conditionalEqualsValue: {
+                    type: Type.STRING,
+                    description: 'Value of conditionalOnFieldId that reveals this field',
+                  },
                 },
+                required: ['id', 'type', 'label', 'required'],
               },
             },
-            required: ['title', 'description', 'slug', 'confirmationMessage', 'fields'],
           },
+          required: ['title', 'description', 'slug', 'confirmationMessage', 'fields'],
         },
       });
 
-      const rawText = (response.text ?? '').trim();
       if (!rawText) {
         res.status(502).json({ error: 'AI returned an empty schema. Please try again.' });
         return;
@@ -1033,7 +1185,7 @@ Requirements:
         fields: validatedFields,
       });
     } catch (err: unknown) {
-      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
+      const status = err instanceof MissingAiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Failed to generate form.';
       console.error('AI Form Generation Error:', msg);
       res.status(status).json({ error: `AI Form Generator error: ${msg}` });
@@ -1074,7 +1226,6 @@ Requirements:
     }
 
     try {
-      const ai = getGeminiClient();
       const systemInstruction = `You are the Zacma AI Assistant inside the Zacma SaaS Portal.
 Current User Role: ${userRole}.
 Strict Governance Rules:
@@ -1092,49 +1243,61 @@ ${history.map((h) => `${h.role.toUpperCase()}: ${h.content}`).join('\n')}
 USER REQUEST:
 ${message}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+      const rawText = await generateStructuredAiText({
+        label: 'ai-assistant',
+        systemInstruction,
         contents: promptPayload,
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: {
-                type: Type.STRING,
-                description: 'Clear, helpful response using only authorized workspace data',
-              },
-              suggestedAction: {
-                type: Type.OBJECT,
-                description: 'Optional actionable shortcut or confirmation proposal',
-                properties: {
-                  type: {
-                    type: Type.STRING,
-                    description: 'One of: none, create_form, filter_leads, draft_communication, open_business_units',
-                  },
-                  label: { type: Type.STRING, description: 'Short plain button label' },
-                  requiresConfirmation: { type: Type.BOOLEAN },
-                  businessUnitId: { type: Type.STRING },
-                  leadStatus: { type: Type.STRING },
-                  unassignedOnly: { type: Type.BOOLEAN },
-                  formPrompt: { type: Type.STRING },
-                  channel: { type: Type.STRING },
-                  draftSubject: { type: Type.STRING },
-                  draftBody: { type: Type.STRING },
-                },
-                required: ['type', 'label', 'requiresConfirmation'],
-              },
+        jsonSchemaDescription: `{
+  "reply": "string",
+  "suggestedAction": {
+    "type": "none|create_form|filter_leads|draft_communication|open_business_units",
+    "label": "string",
+    "requiresConfirmation": true,
+    "businessUnitId": "optional string",
+    "leadStatus": "optional string",
+    "unassignedOnly": false,
+    "formPrompt": "optional string",
+    "channel": "optional string",
+    "draftSubject": "optional string",
+    "draftBody": "optional string"
+  }
+}`,
+        geminiResponseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            reply: {
+              type: Type.STRING,
+              description: 'Clear, helpful response using only authorized workspace data',
             },
-            required: ['reply'],
+            suggestedAction: {
+              type: Type.OBJECT,
+              description: 'Optional actionable shortcut or confirmation proposal',
+              properties: {
+                type: {
+                  type: Type.STRING,
+                  description: 'One of: none, create_form, filter_leads, draft_communication, open_business_units',
+                },
+                label: { type: Type.STRING, description: 'Short plain button label' },
+                requiresConfirmation: { type: Type.BOOLEAN },
+                businessUnitId: { type: Type.STRING },
+                leadStatus: { type: Type.STRING },
+                unassignedOnly: { type: Type.BOOLEAN },
+                formPrompt: { type: Type.STRING },
+                channel: { type: Type.STRING },
+                draftSubject: { type: Type.STRING },
+                draftBody: { type: Type.STRING },
+              },
+              required: ['type', 'label', 'requiresConfirmation'],
+            },
           },
+          required: ['reply'],
         },
       });
 
       const parsed = safeParseAiJson<{
         reply?: string;
         suggestedAction?: { type?: string } & Record<string, unknown>;
-      }>(response.text ?? '{}', 'ai-assistant');
+      }>(rawText || '{}', 'ai-assistant');
       res.json({
         reply: typeof parsed.reply === 'string' ? parsed.reply : 'I reviewed your authorized workspace data.',
         suggestedAction:
@@ -1143,7 +1306,7 @@ ${message}`;
             : null,
       });
     } catch (err: unknown) {
-      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
+      const status = err instanceof MissingAiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Assistant request failed.';
       console.error('Zacma AI Assistant Error:', msg);
       res.status(status).json({ error: `Zacma AI Assistant error: ${msg}` });
@@ -1197,7 +1360,6 @@ ${message}`;
         : [];
 
     try {
-      const ai = getGeminiClient();
       const systemInstruction = `You are ZACMA AI ASSISTANT, the 24/7 virtual admission officer, student support representative, and training consultant for Zacma Technology Training Institute.
 
 LANGUAGE POLICY:
@@ -1251,50 +1413,68 @@ ${history.map((h) => `${h.role.toUpperCase()}: ${h.text}`).join('\n')}
 LATEST VISITOR MESSAGE:
 ${message}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+      const rawText = await generateStructuredAiText({
+        label: 'support-chat',
+        systemInstruction,
         contents,
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              reply: { type: Type.STRING, description: 'Helpful conversational response in English or Amharic' },
-              detectedLanguage: { type: Type.STRING, description: 'en, am, or other' },
-              intent: {
-                type: Type.STRING,
-                description: 'One of: course_inquiry, registration, student_support, escalation, general',
-              },
-              interestedCourse: { type: Type.STRING, description: 'Matched course title if discussed' },
-              needsHumanEscalation: { type: Type.BOOLEAN },
-              unansweredQuestion: {
-                type: Type.STRING,
-                description: 'Non-empty ONLY if visitor asked a factual question not covered in the catalog or FAQs',
-              },
-              suggestRegistrationFormLink: { type: Type.BOOLEAN },
-              captureLeadSuggested: { type: Type.BOOLEAN },
-              registrationDraft: {
-                type: Type.OBJECT,
-                properties: {
-                  fullName: { type: Type.STRING },
-                  phone: { type: Type.STRING },
-                  email: { type: Type.STRING },
-                  address: { type: Type.STRING },
-                  preferredCourse: { type: Type.STRING },
-                  deliveryMethod: { type: Type.STRING },
-                  preferredSchedule: { type: Type.STRING },
-                  paymentMethod: { type: Type.STRING },
-                  readyForConfirmation: { type: Type.BOOLEAN },
-                },
+        jsonSchemaDescription: `{
+  "reply": "string",
+  "detectedLanguage": "en|am|other",
+  "intent": "course_inquiry|registration|student_support|escalation|general",
+  "interestedCourse": "string",
+  "needsHumanEscalation": false,
+  "unansweredQuestion": "string",
+  "suggestRegistrationFormLink": false,
+  "captureLeadSuggested": false,
+  "registrationDraft": {
+    "fullName": "",
+    "phone": "",
+    "email": "",
+    "address": "",
+    "preferredCourse": "",
+    "deliveryMethod": "",
+    "preferredSchedule": "",
+    "paymentMethod": "",
+    "readyForConfirmation": false
+  }
+}`,
+        geminiResponseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            reply: { type: Type.STRING, description: 'Helpful conversational response in English or Amharic' },
+            detectedLanguage: { type: Type.STRING, description: 'en, am, or other' },
+            intent: {
+              type: Type.STRING,
+              description: 'One of: course_inquiry, registration, student_support, escalation, general',
+            },
+            interestedCourse: { type: Type.STRING, description: 'Matched course title if discussed' },
+            needsHumanEscalation: { type: Type.BOOLEAN },
+            unansweredQuestion: {
+              type: Type.STRING,
+              description: 'Non-empty ONLY if visitor asked a factual question not covered in the catalog or FAQs',
+            },
+            suggestRegistrationFormLink: { type: Type.BOOLEAN },
+            captureLeadSuggested: { type: Type.BOOLEAN },
+            registrationDraft: {
+              type: Type.OBJECT,
+              properties: {
+                fullName: { type: Type.STRING },
+                phone: { type: Type.STRING },
+                email: { type: Type.STRING },
+                address: { type: Type.STRING },
+                preferredCourse: { type: Type.STRING },
+                deliveryMethod: { type: Type.STRING },
+                preferredSchedule: { type: Type.STRING },
+                paymentMethod: { type: Type.STRING },
+                readyForConfirmation: { type: Type.BOOLEAN },
               },
             },
-            required: ['reply', 'detectedLanguage', 'intent', 'needsHumanEscalation'],
           },
+          required: ['reply', 'detectedLanguage', 'intent', 'needsHumanEscalation'],
         },
       });
 
-      const parsed = safeParseAiJson<Record<string, any>>(response.text ?? '{}', 'support-chat');
+      const parsed = safeParseAiJson<Record<string, any>>(rawText || '{}', 'support-chat');
       const validIntents = new Set(['course_inquiry', 'registration', 'student_support', 'escalation', 'general']);
       const validLangs = new Set(['en', 'am', 'other']);
 
@@ -1325,7 +1505,7 @@ ${message}`;
             : null,
       });
     } catch (err: unknown) {
-      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
+      const status = err instanceof MissingAiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Support assistant failed.';
       console.error('AI Support Chat Error:', msg);
       res.status(status).json({ error: `Zacma AI Support error: ${msg}` });
@@ -1364,7 +1544,6 @@ ${message}`;
     }
 
     try {
-      const ai = getGeminiClient();
       const systemInstruction = `You are the Zacma SaaS Portal Communications Copywriter for ${businessUnitName}.
 Generate ready-to-send personalized Email and/or SMS drafts based strictly on the administrator's prompt.
 
@@ -1390,41 +1569,43 @@ APPROVED STANDARD FEE: ${courseFee}
 STAFF PROMPT:
 ${prompt}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+      const rawText = await generateStructuredAiText({
+        label: 'compose-message',
+        systemInstruction,
         contents,
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              emailSubject: {
-                type: Type.STRING,
-                description: 'Concise email subject line using merge tags if helpful',
-              },
-              emailBody: {
-                type: Type.STRING,
-                description: 'Complete personalized plain-text email body',
-              },
-              smsBody: {
-                type: Type.STRING,
-                description: 'Concise personalized SMS message body',
-              },
+        jsonSchemaDescription: `{
+  "emailSubject": "string",
+  "emailBody": "string",
+  "smsBody": "string"
+}`,
+        geminiResponseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            emailSubject: {
+              type: Type.STRING,
+              description: 'Concise email subject line using merge tags if helpful',
             },
-            required: ['emailSubject', 'emailBody', 'smsBody'],
+            emailBody: {
+              type: Type.STRING,
+              description: 'Complete personalized plain-text email body',
+            },
+            smsBody: {
+              type: Type.STRING,
+              description: 'Concise personalized SMS message body',
+            },
           },
+          required: ['emailSubject', 'emailBody', 'smsBody'],
         },
       });
 
-      const parsed = safeParseAiJson<Record<string, unknown>>(response.text ?? '{}', 'compose-message');
+      const parsed = safeParseAiJson<Record<string, unknown>>(rawText || '{}', 'compose-message');
       res.json({
         emailSubject: sanitizeText(parsed.emailSubject, 250),
         emailBody: typeof parsed.emailBody === 'string' ? parsed.emailBody.trim().slice(0, 4000) : '',
         smsBody: typeof parsed.smsBody === 'string' ? parsed.smsBody.trim().slice(0, 600) : '',
       });
     } catch (err: unknown) {
-      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
+      const status = err instanceof MissingAiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Failed to generate message draft.';
       console.error('AI Compose Message Error:', msg);
       res.status(status).json({ error: `AI Message Writer error: ${msg}` });
