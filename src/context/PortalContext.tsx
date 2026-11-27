@@ -44,6 +44,11 @@ import {
   resolveEffectivePermissions,
   verifySessionWithServer,
 } from '../lib/authService';
+import {
+  buildLeadSearchIndex,
+  buildSubmissionSearchIndex,
+  type FullTextSearchIndex,
+} from '../lib/searchIndex';
 import type {
   AppNotification,
   AuditLog,
@@ -121,6 +126,8 @@ interface PortalContextValue {
   forms: DynamicForm[];
   submissions: FormSubmission[];
   leads: Lead[];
+  leadSearchIndex: FullTextSearchIndex<Lead>;
+  submissionSearchIndex: FullTextSearchIndex<FormSubmission>;
   duplicateLeadMap: Map<string, string[]>;
   templates: MessageTemplate[];
   auditLogs: AuditLog[];
@@ -1430,6 +1437,12 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
+  const leadSearchIndex = useMemo(() => buildLeadSearchIndex(leads), [leads]);
+  const submissionSearchIndex = useMemo(
+    () => buildSubmissionSearchIndex(submissions),
+    [submissions]
+  );
+
   return (
     <PortalContext.Provider
       value={{
@@ -1465,6 +1478,8 @@ export function PortalProvider({ children }: { children: React.ReactNode }) {
         forms,
         submissions,
         leads,
+        leadSearchIndex,
+        submissionSearchIndex,
         duplicateLeadMap,
         templates,
         auditLogs,

@@ -19,6 +19,7 @@ import {
   X,
   FileSpreadsheet,
   SlidersHorizontal,
+  Search,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
@@ -41,6 +42,7 @@ import {
   slugify,
 } from '../lib/zacmaService';
 import { PublicFormView } from './PublicFormView';
+import { getHighlightSegments } from '../lib/searchIndex';
 import type {
   DynamicForm,
   FormField,
@@ -77,13 +79,42 @@ const FIELD_TYPES: Array<{ value: FormFieldType; label: string }> = [
   { value: 'conditional', label: 'Conditional Field' },
 ];
 
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  if (!query.trim() || !text) return <>{text}</>;
+  const segments = getHighlightSegments(text, query);
+  return (
+    <>
+      {segments.map((seg, idx) =>
+        seg.match ? (
+          <mark
+            key={idx}
+            className="bg-amber-100 text-slate-900 rounded-xs px-0.5 font-semibold"
+          >
+            {seg.text}
+          </mark>
+        ) : (
+          <React.Fragment key={idx}>{seg.text}</React.Fragment>
+        )
+      )}
+    </>
+  );
+}
+
 export function FormBuilderModule({
   activeSection,
   initialBusinessUnitId,
   initialAiPrompt,
   onNavigate,
 }: Props) {
-  const { user, organization, effectiveRole, businessUnits, forms, submissions } = usePortal();
+  const {
+    user,
+    organization,
+    effectiveRole,
+    businessUnits,
+    forms,
+    submissions,
+    submissionSearchIndex,
+  } = usePortal();
   const canEdit = canManageForms(effectiveRole);
 
   // Selected business unit and active form being built/edited
@@ -117,7 +148,9 @@ export function FormBuilderModule({
   const [qrForm, setQrForm] = useState<DynamicForm | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [selectedSubmission, setSelectedSubmission] = useState<FormSubmission | null>(null);
+  const [subSearch, setSubSearch] = useState('');
   const [subFilterBu, setSubFilterBu] = useState('all');
+  const [subFilterForm, setSubFilterForm] = useState('all');
 
   useEffect(() => {
     if (initialBusinessUnitId) setSelectedBuId(initialBusinessUnitId);
@@ -1287,41 +1320,121 @@ export function FormBuilderModule({
   // VIEW 4: FORM SUBMISSIONS
   // ===========================================================================
   if (activeSection === 'form_submissions') {
-    const filteredSubs =
-      subFilterBu === 'all'
-        ? submissions
-        : submissions.filter((s) => s.businessUnitId === subFilterBu);
+    const indexedPool = subSearch.trim()
+      ? submissionSearchIndex.search(subSearch)
+      : submissions;
+    const filteredSubs = indexedPool.filter((s) => {
+      if (subFilterBu !== 'all' && s.businessUnitId !== subFilterBu) return false;
+      if (subFilterForm !== 'all' && s.formId !== subFilterForm) return false;
+      return true;
+    });
+    const hasSubFilters =
+      Boolean(subSearch.trim()) || subFilterBu !== 'all' || subFilterForm !== 'all';
+
+    const clearSubFilters = () => {
+      setSubSearch('');
+      setSubFilterBu('all');
+      setSubFilterForm('all');
+    };
 
     return (
-      <div className="space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="font-display text-2xl font-bold text-slate-900">Form Submissions</h1>
-            <p className="text-sm text-slate-600 mt-1">
-              Every verified submission automatically creates a linked lead record in the CRM.
-            </p>
+      <div className="space-y-5">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-slate-900">Form Submissions</h1>
+          <p className="text-sm text-slate-600 mt-1">
+            Every verified submission automatically creates a linked lead record in the CRM.
+          </p>
+        </div>
+
+        {/* Full-Text Search & Filter Toolbar */}
+        <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
+            <div className="relative md:col-span-2">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={subSearch}
+                onChange={(e) => setSubSearch(e.target.value)}
+                placeholder="Search contact name, ZCM lead ref ID, email, phone, or form answers…"
+                aria-label="Search form submissions by contact name, lead reference ID, email, phone, or form answers"
+                className="w-full pl-9 pr-8 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600"
+              />
+              {subSearch && (
+                <button
+                  type="button"
+                  onClick={() => setSubSearch('')}
+                  aria-label="Clear search query"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            <select
+              value={subFilterBu}
+              onChange={(e) => setSubFilterBu(e.target.value)}
+              className="px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
+            >
+              <option value="all">All Business Units</option>
+              {businessUnits.map((bu) => (
+                <option key={bu.id} value={bu.id}>
+                  {bu.name}
+                </option>
+              ))}
+            </select>
+            <select
+              value={subFilterForm}
+              onChange={(e) => setSubFilterForm(e.target.value)}
+              className="px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
+            >
+              <option value="all">All Forms</option>
+              {forms.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.title}
+                </option>
+              ))}
+            </select>
           </div>
-          <select
-            value={subFilterBu}
-            onChange={(e) => setSubFilterBu(e.target.value)}
-            className="px-3 py-2 text-xs font-medium border border-slate-300 rounded-lg bg-white"
-          >
-            <option value="all">All Business Units</option>
-            {businessUnits.map((bu) => (
-              <option key={bu.id} value={bu.id}>
-                {bu.name}
-              </option>
-            ))}
-          </select>
+          {hasSubFilters && (
+            <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 text-xs text-slate-500">
+              <span>
+                Showing <strong className="font-mono text-slate-900">{filteredSubs.length}</strong>{' '}
+                of <span className="font-mono">{submissions.length}</span> indexed submissions
+                {subSearch.trim() ? ` matching "${subSearch.trim()}"` : ''}
+              </span>
+              <button
+                type="button"
+                onClick={clearSubFilters}
+                className="text-blue-700 hover:underline font-medium cursor-pointer"
+              >
+                Clear filters
+              </button>
+            </div>
+          )}
         </div>
 
         {filteredSubs.length === 0 ? (
           <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
             <FileSpreadsheet className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-            <p className="text-sm text-slate-600">
-              No form submissions recorded yet. Publish a form and share its public URL to start
-              capturing responses.
-            </p>
+            {submissions.length === 0 ? (
+              <p className="text-sm text-slate-600">
+                No form submissions recorded yet. Publish a form and share its public URL to start
+                capturing responses.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-sm text-slate-600">
+                  No form submissions match the current search or filters.
+                </p>
+                <button
+                  type="button"
+                  onClick={clearSubFilters}
+                  className="text-xs font-medium text-blue-700 hover:underline cursor-pointer"
+                >
+                  Clear search &amp; filters
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -1340,17 +1453,24 @@ export function FormBuilderModule({
                   {filteredSubs.map((sub) => (
                     <tr key={sub.id} className="hover:bg-slate-50/70">
                       <td className="py-3 px-4 font-mono text-xs font-semibold text-blue-700">
-                        {sub.leadRef}
+                        <HighlightedText text={sub.leadRef} query={subSearch} />
                       </td>
                       <td className="py-3 px-4">
-                        <div className="font-medium text-slate-900">{sub.submitterName}</div>
+                        <div className="font-medium text-slate-900">
+                          <HighlightedText text={sub.submitterName} query={subSearch} />
+                        </div>
                         <div className="text-xs text-slate-500">
-                          {sub.submitterEmail || '—'} · {sub.submitterPhone || '—'}
+                          <HighlightedText text={sub.submitterEmail || '—'} query={subSearch} /> ·{' '}
+                          <HighlightedText text={sub.submitterPhone || '—'} query={subSearch} />
                         </div>
                       </td>
                       <td className="py-3 px-4">
-                        <div className="text-slate-900">{sub.formTitle}</div>
-                        <div className="text-xs text-slate-500">{sub.businessUnitName}</div>
+                        <div className="text-slate-900">
+                          <HighlightedText text={sub.formTitle} query={subSearch} />
+                        </div>
+                        <div className="text-xs text-slate-500">
+                          <HighlightedText text={sub.businessUnitName} query={subSearch} />
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-xs text-slate-500 font-mono tabular-nums">
                         {formatTimestamp(sub.createdAt)}

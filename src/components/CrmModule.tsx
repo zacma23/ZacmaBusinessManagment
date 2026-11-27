@@ -29,6 +29,7 @@ import {
   formatTimestamp,
   updateLeadAndLog,
 } from '../lib/zacmaService';
+import { getHighlightSegments } from '../lib/searchIndex';
 import type {
   CommunicationRecord,
   Lead,
@@ -63,6 +64,27 @@ const ALL_STATUSES: Array<{ key: LeadStatus | 'all'; label: string }> = [
   { key: 'archived', label: 'Archived' },
 ];
 
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  if (!query.trim() || !text) return <>{text}</>;
+  const segments = getHighlightSegments(text, query);
+  return (
+    <>
+      {segments.map((seg, idx) =>
+        seg.match ? (
+          <mark
+            key={idx}
+            className="bg-amber-100 text-slate-900 rounded-xs px-0.5 font-semibold"
+          >
+            {seg.text}
+          </mark>
+        ) : (
+          <React.Fragment key={idx}>{seg.text}</React.Fragment>
+        )
+      )}
+    </>
+  );
+}
+
 export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
   const {
     user,
@@ -72,6 +94,7 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
     businessUnits,
     forms,
     leads,
+    leadSearchIndex,
     duplicateLeadMap,
     members,
   } = usePortal();
@@ -167,25 +190,31 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
   };
 
   const filteredLeads = useMemo(() => {
-    return leads.filter((l) => {
+    const baseLeads = search.trim() ? leadSearchIndex.search(search) : leads;
+    return baseLeads.filter((l) => {
       if (buFilter !== 'all' && l.businessUnitId !== buFilter) return false;
       if (formFilter !== 'all' && l.formId !== formFilter) return false;
       if (statusFilter !== 'all' && l.status !== statusFilter) return false;
       if (assignmentFilter === 'assigned' && !l.assignedStaffId) return false;
       if (assignmentFilter === 'unassigned' && l.assignedStaffId) return false;
-      if (search.trim()) {
-        const q = search.toLowerCase();
-        return (
-          l.fullName.toLowerCase().includes(q) ||
-          l.email.toLowerCase().includes(q) ||
-          l.phone.toLowerCase().includes(q) ||
-          l.leadRef.toLowerCase().includes(q) ||
-          l.businessUnitName.toLowerCase().includes(q)
-        );
-      }
       return true;
     });
-  }, [leads, buFilter, formFilter, statusFilter, assignmentFilter, search]);
+  }, [leads, leadSearchIndex, buFilter, formFilter, statusFilter, assignmentFilter, search]);
+
+  const hasActiveLeadFilters =
+    Boolean(search.trim()) ||
+    buFilter !== 'all' ||
+    formFilter !== 'all' ||
+    statusFilter !== 'all' ||
+    assignmentFilter !== 'all';
+
+  const clearLeadFilters = () => {
+    setSearch('');
+    setBuFilter('all');
+    setFormFilter('all');
+    setStatusFilter('all');
+    setAssignmentFilter('all');
+  };
 
   const handleStageMove = async (lead: Lead, nextStatus: LeadStatus) => {
     if (!organization || !user || lead.status === nextStatus) return;
@@ -484,27 +513,62 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
   // ===========================================================================
   if (activeSection === 'follow_ups') {
     const today = new Date().toISOString().slice(0, 10);
-    const scheduled = leads
+    const allScheduled = leads.filter((l) => Boolean(l.followUpDate) && l.status !== 'archived');
+    const searchPool = search.trim() ? leadSearchIndex.search(search) : allScheduled;
+    const scheduled = searchPool
       .filter((l) => Boolean(l.followUpDate) && l.status !== 'archived')
       .sort((a, b) => a.followUpDate.localeCompare(b.followUpDate));
 
     return (
       <div className="space-y-6">
-        <div>
-          <h1 className="font-display text-2xl font-bold text-slate-900">Follow-up Schedule</h1>
-          <p className="text-sm text-slate-600 mt-1">
-            Track overdue and upcoming follow-up calls, meetings, and reminders across authorized
-            business units.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h1 className="font-display text-2xl font-bold text-slate-900">Follow-up Schedule</h1>
+            <p className="text-sm text-slate-600 mt-1">
+              Track overdue and upcoming follow-up calls, meetings, and reminders across authorized
+              business units.
+            </p>
+          </div>
+          <div className="relative w-full sm:w-80">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filter by contact name or lead ref ID…"
+              aria-label="Search follow-ups by contact name or lead reference ID"
+              className="w-full pl-9 pr-8 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                aria-label="Clear search"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
 
         {scheduled.length === 0 ? (
           <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
             <Clock className="w-10 h-10 text-slate-300 mx-auto mb-3" />
             <p className="text-sm text-slate-600">
-              No follow-ups scheduled yet. Open any lead in All Leads or Pipeline to set a follow-up
-              date.
+              {allScheduled.length === 0
+                ? 'No follow-ups scheduled yet. Open any lead in All Leads or Pipeline to set a follow-up date.'
+                : `No scheduled follow-ups match "${search.trim()}".`}
             </p>
+            {search.trim() && allScheduled.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="mt-3 text-xs font-medium text-blue-700 hover:underline cursor-pointer"
+              >
+                Clear search
+              </button>
+            )}
           </div>
         ) : (
           <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
@@ -517,8 +581,12 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
                 >
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="font-semibold text-slate-900">{lead.fullName}</span>
-                      <span className="font-mono text-xs text-slate-400">{lead.leadRef}</span>
+                      <span className="font-semibold text-slate-900">
+                        <HighlightedText text={lead.fullName} query={search} />
+                      </span>
+                      <span className="font-mono text-xs text-slate-400">
+                        <HighlightedText text={lead.leadRef} query={search} />
+                      </span>
                       {isOverdue && (
                         <span className="text-xs font-semibold text-red-600">Overdue</span>
                       )}
@@ -637,65 +705,96 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
       </div>
 
       {/* Multi-Filter Toolbar */}
-      <div className="bg-white border border-slate-200 rounded-xl p-3 grid grid-cols-1 md:grid-cols-5 gap-2.5">
-        <div className="relative md:col-span-2">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, email, phone, or ZCM reference…"
-            className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600"
-          />
-        </div>
-        <select
-          value={buFilter}
-          onChange={(e) => setBuFilter(e.target.value)}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
-        >
-          <option value="all">All Business Units</option>
-          {businessUnits.map((bu) => (
-            <option key={bu.id} value={bu.id}>
-              {bu.name}
-            </option>
-          ))}
-        </select>
-        <select
-          value={formFilter}
-          onChange={(e) => setFormFilter(e.target.value)}
-          className="px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
-        >
-          <option value="all">All Forms</option>
-          {forms.map((f) => (
-            <option key={f.id} value={f.id}>
-              {f.title}
-            </option>
-          ))}
-        </select>
-        <div className="flex gap-2">
-          {!isKanban && (
+      <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5">
+          <div className="relative md:col-span-2">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search contact name, ZCM lead ref ID, email, phone, or notes…"
+              aria-label="Search leads by contact name, lead reference ID, email, phone, or notes"
+              className="w-full pl-9 pr-8 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-blue-600"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                aria-label="Clear search query"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          <select
+            value={buFilter}
+            onChange={(e) => setBuFilter(e.target.value)}
+            className="px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
+          >
+            <option value="all">All Business Units</option>
+            {businessUnits.map((bu) => (
+              <option key={bu.id} value={bu.id}>
+                {bu.name}
+              </option>
+            ))}
+          </select>
+          <select
+            value={formFilter}
+            onChange={(e) => setFormFilter(e.target.value)}
+            className="px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
+          >
+            <option value="all">All Forms</option>
+            {forms.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.title}
+              </option>
+            ))}
+          </select>
+          <div className="flex gap-2">
+            {!isKanban && (
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as LeadStatus | 'all')}
+                className="flex-1 px-2.5 py-2 text-xs border border-slate-200 rounded-lg bg-white"
+              >
+                {ALL_STATUSES.map((s) => (
+                  <option key={s.key} value={s.key}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            )}
             <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as LeadStatus | 'all')}
+              value={assignmentFilter}
+              onChange={(e) =>
+                setAssignmentFilter(e.target.value as 'all' | 'assigned' | 'unassigned')
+              }
               className="flex-1 px-2.5 py-2 text-xs border border-slate-200 rounded-lg bg-white"
             >
-              {ALL_STATUSES.map((s) => (
-                <option key={s.key} value={s.key}>
-                  {s.label}
-                </option>
-              ))}
+              <option value="all">Any Owner</option>
+              <option value="unassigned">Unassigned</option>
+              <option value="assigned">Assigned</option>
             </select>
-          )}
-          <select
-            value={assignmentFilter}
-            onChange={(e) => setAssignmentFilter(e.target.value as 'all' | 'assigned' | 'unassigned')}
-            className="flex-1 px-2.5 py-2 text-xs border border-slate-200 rounded-lg bg-white"
-          >
-            <option value="all">Any Owner</option>
-            <option value="unassigned">Unassigned</option>
-            <option value="assigned">Assigned</option>
-          </select>
+          </div>
         </div>
+        {hasActiveLeadFilters && (
+          <div className="flex items-center justify-between pt-1.5 border-t border-slate-100 text-xs text-slate-500">
+            <span>
+              Showing <strong className="font-mono text-slate-900">{filteredLeads.length}</strong> of{' '}
+              <span className="font-mono">{leads.length}</span> indexed leads
+              {search.trim() ? ` matching "${search.trim()}"` : ''}
+            </span>
+            <button
+              type="button"
+              onClick={clearLeadFilters}
+              className="text-blue-700 hover:underline font-medium cursor-pointer"
+            >
+              Clear filters
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Kanban Board View */}
@@ -733,7 +832,9 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
                         className="bg-white border border-slate-200 hover:border-blue-400 rounded-lg p-3.5 cursor-pointer shadow-2xs transition-colors"
                       >
                         <div className="text-xs font-mono text-slate-400 mb-1 flex items-center justify-between">
-                          <span>{lead.leadRef}</span>
+                          <span>
+                            <HighlightedText text={lead.leadRef} query={search} />
+                          </span>
                           <span
                             className={`capitalize font-sans font-semibold ${
                               lead.priority === 'urgent'
@@ -747,7 +848,7 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
                           </span>
                         </div>
                         <div className="text-sm font-semibold text-slate-900 truncate">
-                          {lead.fullName}
+                          <HighlightedText text={lead.fullName} query={search} />
                         </div>
                         <div className="text-xs text-slate-500 truncate mt-0.5">
                           {lead.businessUnitName}
@@ -776,8 +877,17 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
         /* High-Density Table View */
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
           {filteredLeads.length === 0 ? (
-            <div className="p-12 text-center text-sm text-slate-500">
-              No leads match the current filters.
+            <div className="p-12 text-center text-sm text-slate-500 space-y-2">
+              <p>No leads match the current search or filters.</p>
+              {hasActiveLeadFilters && (
+                <button
+                  type="button"
+                  onClick={clearLeadFilters}
+                  className="text-xs font-medium text-blue-700 hover:underline cursor-pointer"
+                >
+                  Clear search &amp; filters
+                </button>
+              )}
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -831,12 +941,19 @@ export function CrmModule({ activeSection, filterPreset, onNavigate }: Props) {
                             className="text-left group cursor-pointer"
                           >
                             <div className="font-semibold text-slate-900 group-hover:text-blue-700">
-                              {lead.fullName}
+                              <HighlightedText text={lead.fullName} query={search} />
                             </div>
                             <div className="text-xs text-slate-500 flex items-center gap-1.5 flex-wrap">
-                              <span className="font-mono text-blue-700">{lead.leadRef}</span>
+                              <span className="font-mono text-blue-700">
+                                <HighlightedText text={lead.leadRef} query={search} />
+                              </span>
                               <span aria-hidden="true">·</span>
-                              <span>{lead.email || lead.phone || 'No contact'}</span>
+                              <span>
+                                <HighlightedText
+                                  text={lead.email || lead.phone || 'No contact'}
+                                  query={search}
+                                />
+                              </span>
                               {dups && (
                                 <>
                                   <span aria-hidden="true">·</span>
