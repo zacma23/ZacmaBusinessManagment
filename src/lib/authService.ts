@@ -305,7 +305,9 @@ export interface AuthProviderStatus {
 }
 
 export async function fetchAuthProviderStatus(): Promise<AuthProviderStatus> {
-  const serverRes = await safeFetchJson<AuthProviderStatus>('/api/auth/provider-status');
+  const serverRes = await safeFetchJson<AuthProviderStatus>('/api/auth/provider-status', {
+    allowStaticFallback: true,
+  });
   if (serverRes.ok && serverRes.data) {
     return serverRes.data;
   }
@@ -373,6 +375,7 @@ export async function verifySessionWithServer(): Promise<ServerVerifiedSession |
     const idToken = await currentUser.getIdToken();
     const res = await safeFetchJson<ServerVerifiedSession>('/api/auth/session-verify', {
       headers: { Authorization: `Bearer ${idToken}` },
+      allowStaticFallback: true,
     });
     if (res.ok && res.data && res.data.authenticated) {
       return res.data;
@@ -525,6 +528,7 @@ export async function loginWithUsernameAndPassword(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier, password }),
+    allowStaticFallback: true,
   });
 
   if (loginRes.isJson && !loginRes.isEndpointUnavailable) {
@@ -595,6 +599,7 @@ export async function requestPasswordReset(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ identifier }),
+    allowStaticFallback: true,
   });
 
   if (resetRes.isJson && !resetRes.isEndpointUnavailable) {
@@ -795,6 +800,7 @@ export async function adminProvisionUserAccount(
         organizationId: params.organizationId,
         role: params.role,
       }),
+      allowStaticFallback: true,
     });
 
     if (createRes.isJson && !createRes.isEndpointUnavailable) {

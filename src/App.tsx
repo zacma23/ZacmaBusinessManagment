@@ -39,6 +39,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { JsonParseErrorBoundary } from './components/JsonParseErrorBoundary';
 import { PortalProvider, usePortal } from './context/PortalContext';
 import { AuthGate } from './components/AuthGate';
 import { PublicFormView } from './components/PublicFormView';
@@ -846,19 +847,23 @@ export default function App() {
   if (publicRoute) {
     return (
       <ErrorBoundary>
-        <PublicFormView
-          businessUnitSlug={publicRoute.businessUnitSlug}
-          formSlug={publicRoute.formSlug}
-        />
+        <JsonParseErrorBoundary>
+          <PublicFormView
+            businessUnitSlug={publicRoute.businessUnitSlug}
+            formSlug={publicRoute.formSlug}
+          />
+        </JsonParseErrorBoundary>
       </ErrorBoundary>
     );
   }
 
   return (
     <ErrorBoundary>
-      <PortalProvider>
-        <PortalShell />
-      </PortalProvider>
+      <JsonParseErrorBoundary>
+        <PortalProvider>
+          <PortalShell />
+        </PortalProvider>
+      </JsonParseErrorBoundary>
     </ErrorBoundary>
   );
 }

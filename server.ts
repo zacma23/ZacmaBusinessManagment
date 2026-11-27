@@ -92,11 +92,38 @@ function safeParseAiJson<T = Record<string, unknown>>(rawText: string, label: st
   }
 }
 
-// Gemini AI Server-Side Client (shared singleton)
+// Resolve server-side Gemini API key (supports GEMINI_API_KEY and standard server aliases)
+function resolveGeminiApiKey(): string {
+  const candidates = [
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_API_KEY,
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+    process.env.API_KEY,
+  ];
+  for (const raw of candidates) {
+    const trimmed = (raw || '').trim().replace(/^["']|["']$/g, '');
+    if (trimmed && trimmed !== 'MY_GEMINI_API_KEY') {
+      return trimmed;
+    }
+  }
+  return '';
+}
+
+class MissingGeminiKeyError extends Error {
+  public readonly status = 503;
+  constructor() {
+    super(
+      'GEMINI_API_KEY is not configured on the server. Add GEMINI_API_KEY in your hosting environment (e.g., Vercel Project Settings → Environment Variables, then redeploy) or check Settings > Secrets.'
+    );
+    this.name = 'MissingGeminiKeyError';
+  }
+}
+
+// Gemini AI Server-Side Client
 const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = resolveGeminiApiKey();
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured on the server.');
+    throw new MissingGeminiKeyError();
   }
   return new GoogleGenAI({
     apiKey,
@@ -807,7 +834,7 @@ export function createApiApp(): express.Express {
 
     res.json({
       gemini_ai: {
-        configured: Boolean(process.env.GEMINI_API_KEY),
+        configured: Boolean(resolveGeminiApiKey()),
         model: 'gemini-4-hydrogen',
       },
       resend_email: {
@@ -1006,9 +1033,10 @@ Requirements:
         fields: validatedFields,
       });
     } catch (err: unknown) {
+      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Failed to generate form.';
       console.error('AI Form Generation Error:', msg);
-      res.status(500).json({ error: `AI Form Generator error: ${msg}` });
+      res.status(status).json({ error: `AI Form Generator error: ${msg}` });
     }
   });
 
@@ -1115,9 +1143,10 @@ ${message}`;
             : null,
       });
     } catch (err: unknown) {
+      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Assistant request failed.';
       console.error('Zacma AI Assistant Error:', msg);
-      res.status(500).json({ error: `Zacma AI Assistant error: ${msg}` });
+      res.status(status).json({ error: `Zacma AI Assistant error: ${msg}` });
     }
   });
 
@@ -1296,9 +1325,10 @@ ${message}`;
             : null,
       });
     } catch (err: unknown) {
+      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Support assistant failed.';
       console.error('AI Support Chat Error:', msg);
-      res.status(500).json({ error: `Zacma AI Support error: ${msg}` });
+      res.status(status).json({ error: `Zacma AI Support error: ${msg}` });
     }
   });
 
@@ -1394,9 +1424,10 @@ ${prompt}`;
         smsBody: typeof parsed.smsBody === 'string' ? parsed.smsBody.trim().slice(0, 600) : '',
       });
     } catch (err: unknown) {
+      const status = err instanceof MissingGeminiKeyError ? err.status : 500;
       const msg = err instanceof Error ? err.message : 'Failed to generate message draft.';
       console.error('AI Compose Message Error:', msg);
-      res.status(500).json({ error: `AI Message Writer error: ${msg}` });
+      res.status(status).json({ error: `AI Message Writer error: ${msg}` });
     }
   });
 
