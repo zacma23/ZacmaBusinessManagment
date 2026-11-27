@@ -115,8 +115,10 @@ function cleanEnvSecret(raw?: string): string {
   return trimmed;
 }
 
+const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-120b';
+
 // Resolve server-side AI provider from environment variables (never hardcoded or exposed to client).
-// Supports xAI Grok (GROK_API_KEY / XAI_API_KEY), Groq (GROQ_API_KEY or gsk_* key), and Gemini (GEMINI_API_KEY).
+// Supports Groq (GROQ_API_KEY / GROK_API_KEY with openai/gpt-oss-120b), xAI Grok (xai-* key), and Gemini (GEMINI_API_KEY).
 function resolveAiProvider(): ResolvedAiProvider | null {
   const preferred = (process.env.AI_PROVIDER || '').trim().toLowerCase();
 
@@ -138,7 +140,12 @@ function resolveAiProvider(): ResolvedAiProvider | null {
   const makeGroq = (apiKey: string): ResolvedAiProvider => ({
     provider: 'groq',
     apiKey,
-    model: (process.env.GROQ_MODEL || 'llama-3.3-70b-versatile').trim(),
+    model: (
+      process.env.GROQ_MODEL ||
+      process.env.GROK_MODEL ||
+      process.env.MODEL ||
+      DEFAULT_GROQ_MODEL
+    ).trim(),
     baseUrl: (process.env.GROQ_API_BASE_URL || 'https://api.groq.com/openai/v1')
       .trim()
       .replace(/\/+$/, ''),
@@ -161,22 +168,22 @@ function resolveAiProvider(): ResolvedAiProvider | null {
     return makeGrok(grokRaw);
   }
 
-  // Default priority: Grok/xAI -> Groq -> Gemini (with prefix auto-detection for gsk_ and xai-)
-  if (grokRaw) {
-    if (grokRaw.startsWith('gsk_')) {
-      return makeGroq(grokRaw);
-    }
-    return makeGrok(grokRaw);
-  }
+  // Default priority: Groq (openai/gpt-oss-120b) -> xAI Grok -> Gemini
   if (groqRaw) {
     return makeGroq(groqRaw);
   }
-  if (geminiRaw) {
-    if (geminiRaw.startsWith('xai-')) {
-      return makeGrok(geminiRaw);
+  if (grokRaw) {
+    if (grokRaw.startsWith('xai-')) {
+      return makeGrok(grokRaw);
     }
+    return makeGroq(grokRaw);
+  }
+  if (geminiRaw) {
     if (geminiRaw.startsWith('gsk_')) {
       return makeGroq(geminiRaw);
+    }
+    if (geminiRaw.startsWith('xai-')) {
+      return makeGrok(geminiRaw);
     }
     return makeGemini(geminiRaw);
   }
@@ -188,7 +195,7 @@ class MissingAiKeyError extends Error {
   public readonly status = 503;
   constructor() {
     super(
-      'AI API key is not configured on the server. Add GROK_API_KEY (or XAI_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY) in Vercel Project Settings → Environment Variables, then redeploy.'
+      'AI API key is not configured on the server. Add GROQ_API_KEY (or GROK_API_KEY, XAI_API_KEY, or GEMINI_API_KEY) in Vercel Project Settings → Environment Variables, then redeploy.'
     );
     this.name = 'MissingAiKeyError';
   }
@@ -215,27 +222,46 @@ STRICT JSON OUTPUT REQUIREMENT:
 Return ONLY a single valid JSON object with no markdown fences, no commentary, and no extra keys outside this structure:
 ${params.jsonSchemaDescription}`;
 
-    const upstream = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${resolved.apiKey}`,
-      },
-      body: JSON.stringify({
+    const callOpenAiCompatible = async (useJsonResponseFormat: boolean) => {
+      const requestBody: Record<string, unknown> = {
         model: resolved.model,
         temperature: 0.2,
-        response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: params.contents },
         ],
-      }),
-    });
+      };
+      if (useJsonResponseFormat) {
+        requestBody.response_format = { type: 'json_object' };
+      }
 
-    const payload = await safeParseUpstreamJson<{
-      choices?: Array<{ message?: { content?: string } }>;
-      error?: { message?: string };
-    }>(upstream, `${resolved.provider}:${params.label}`);
+      const upstream = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${resolved.apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      const payload = await safeParseUpstreamJson<{
+        choices?: Array<{ message?: { content?: string } }>;
+        error?: { message?: string; code?: string };
+      }>(upstream, `${resolved.provider}:${params.label}`);
+
+      return { upstream, payload };
+    };
+
+    let { upstream, payload } = await callOpenAiCompatible(true);
+
+    // Some reasoning models (e.g. openai/gpt-oss-120b) may occasionally return 400 on strict json_object validation;
+    // retry once without response_format and parse via safeParseAiJson.
+    if (!upstream.ok && upstream.status === 400) {
+      const errText = `${payload?.error?.code || ''} ${payload?.error?.message || ''}`.toLowerCase();
+      if (errText.includes('json') || errText.includes('response_format')) {
+        ({ upstream, payload } = await callOpenAiCompatible(false));
+      }
+    }
 
     if (!upstream.ok) {
       const upstreamMsg = payload?.error?.message || `HTTP ${upstream.status}`;
